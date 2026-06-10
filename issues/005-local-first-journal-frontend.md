@@ -3,8 +3,12 @@ id: 005
 title: "Local-first journal frontend (passphrase key, IndexedDB, CRUD)"
 type: AFK
 labels: [ready]
-status: open
+status: done
 ---
+
+> **Status note (2026-06-10):** Implemented in `frontend/`. All acceptance
+> criteria covered by tests (vitest 18/18: crypto + store suites) and a clean
+> production build. Not manually clicked through in a real browser.
 
 ## What to build
 

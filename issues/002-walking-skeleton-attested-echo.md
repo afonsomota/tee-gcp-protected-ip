@@ -3,8 +3,15 @@ id: 002
 title: "Walking skeleton: attested echo enclave on Confidential Space"
 type: AFK
 labels: [ready]
-status: open
+status: needs-review
 ---
+
+> **Status note (2026-06-10):** Implemented in `launcher/`, `infra/`, `scripts/`.
+> All local checks pass (cargo fmt/clippy/test, terraform validate both roots,
+> verifier pytest 6/6). The live cloud run (apply → /echo → verify → destroy)
+> is deferred to a human: gcloud credentials on this machine are expired
+> (`invalid_grant`, interactive re-auth required). Exact ordered commands are
+> in `infra/README.md` under "Live run".
 
 ## What to build
 

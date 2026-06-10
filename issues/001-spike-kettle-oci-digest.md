@@ -3,8 +3,16 @@ id: 001
 title: "Spike: can Kettle attest an OCI image digest end-to-end?"
 type: HITL
 labels: [spike, ready]
-status: open
+status: needs-review
 ---
+
+> **Status note (2026-06-10):** Spike report delivered at
+> `docs/spikes/001-kettle-oci-digest.md`. Finding: kettle attests **binary**
+> digests only, not OCI image digests — **conditional GO** via a deterministic
+> binary→image wrap (prototyped, byte-identical digests across runs).
+> `kettle attest` inside a real SEV-SNP CVM not run (expired gcloud creds).
+> HITL gate: human must confirm the go/no-go before issue 012 starts —
+> see the report's "Open for human review" section.
 
 ## What to build
 
