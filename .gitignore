@@ -1,2 +1,33 @@
+# Agent / local tooling
 .claude/
 .agents/
+CLAUDE.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Local environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Rust
+target/
+
+# Node
+node_modules/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
