@@ -23,6 +23,14 @@ locals {
   image_reference = "${var.region}-docker.pkg.dev/${var.project_id}/${var.repository_id}/launcher@${var.image_digest}"
 }
 
+# Static external IP reserved by infra/bootstrap. Looked up by name rather
+# than via remote state so this root has no dependency on bootstrap's state —
+# only on the address existing in the project.
+data "google_compute_address" "cvm" {
+  name   = var.static_ip_name
+  region = var.region
+}
+
 # Identity the workload VM runs as. Confidential Space requires the
 # workloadUser role; reader on Artifact Registry to pull the image.
 resource "google_service_account" "workload" {
@@ -89,7 +97,9 @@ resource "google_compute_instance" "cvm" {
 
   network_interface {
     network = "default"
-    access_config {} # ephemeral external IP
+    access_config {
+      nat_ip = data.google_compute_address.cvm.address # static IP from infra/bootstrap
+    }
   }
 
   metadata = {

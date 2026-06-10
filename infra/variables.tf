@@ -48,3 +48,9 @@ variable "http_port" {
   type        = number
   default     = 8080
 }
+
+variable "static_ip_name" {
+  description = "Name of the static external IP reserved by infra/bootstrap"
+  type        = string
+  default     = "tee-example-cvm"
+}
