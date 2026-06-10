@@ -3,8 +3,19 @@ id: 013
 title: "Frontend CI to GitHub Pages with custom domain"
 type: AFK
 labels: [ready]
-status: open
+status: needs-review
 ---
+
+> **Status note (2026-06-10):** Implemented: `.github/workflows/deploy-frontend.yml`
+> (pnpm install/test/build → Pages via configure-pages/upload-pages-artifact/
+> deploy-pages, CNAME from `vars.FRONTEND_DOMAIN`), typed build-time config in
+> `frontend/src/lib/config.ts` (`VITE_API_ENDPOINT`, `VITE_EXPECTED_IMAGE_DIGEST`,
+> one vitest test), and `frontend/README.md` (local-run, config values, TOFU
+> caveat, one-time Pages/DNS/variables setup). Validated locally: YAML parses,
+> tests pass, env-injected `pnpm build` passes. Deferred (no GitHub remote/repo
+> exists yet, so a live deploy is unverifiable): actual Pages deploy over HTTPS
+> on the custom domain, and the deployed app talking to the live enclave (badge
+> verifies / chat works — the badge and the "know more" page arrive in issue 009).
 
 ## What to build
 

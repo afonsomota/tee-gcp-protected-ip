@@ -1,0 +1,97 @@
+# Builds the SPA and deploys frontend/dist to GitHub Pages on push to main.
+#
+# One-time repo setup (see frontend/README.md for details):
+#   - Settings -> Pages -> Source: "GitHub Actions"
+#   - Repo variables (Settings -> Secrets and variables -> Actions -> Variables):
+#       FRONTEND_DOMAIN             custom domain for the SPA (e.g. journal.example.com)
+#       VITE_API_ENDPOINT           enclave API base URL (e.g. https://api.example.com)
+#       VITE_EXPECTED_IMAGE_DIGEST  pinned enclave image digest (sha256:...)
+#   - DNS: CNAME record for FRONTEND_DOMAIN pointing at <owner>.github.io
+#
+# If FRONTEND_DOMAIN is unset, no CNAME file is written and the site is served
+# from the default https://<owner>.github.io/<repo>/ URL (the Vite build is
+# path-relative, so it works in both locations).
+name: Deploy frontend to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/deploy-frontend.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deployment at a time; don't cancel an in-flight production deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        env:
+          # Explicit build-time config (frontend/src/lib/config.ts).
+          VITE_API_ENDPOINT: ${{ vars.VITE_API_ENDPOINT }}
+          VITE_EXPECTED_IMAGE_DIGEST: ${{ vars.VITE_EXPECTED_IMAGE_DIGEST }}
+        run: pnpm build
+
+      - name: Add CNAME for custom domain
+        env:
+          FRONTEND_DOMAIN: ${{ vars.FRONTEND_DOMAIN }}
+        run: |
+          if [ -n "$FRONTEND_DOMAIN" ]; then
+            echo "$FRONTEND_DOMAIN" > dist/CNAME
+            echo "CNAME set to $FRONTEND_DOMAIN"
+          else
+            echo "::notice::FRONTEND_DOMAIN repo variable not set; deploying without a custom domain."
+          fi
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: frontend/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
