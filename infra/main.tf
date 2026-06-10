@@ -8,6 +8,10 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 6.0"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.13"
+    }
   }
 }
 
@@ -46,6 +50,21 @@ resource "google_project_iam_member" "ar_reader" {
   project = var.project_id
   role    = "roles/artifactregistry.reader"
   member  = "serviceAccount:${google_service_account.workload.email}"
+}
+
+# IAM grants on a freshly created service account are eventually consistent
+# (up to a couple of minutes). Without this wait the CVM boots before the
+# grants propagate: it can't pull the image (artifactregistry.reader) or
+# write logs (logging.logWriter), so it self-terminates after ~3 minutes
+# with zero guest-side logs. depends_on alone is not enough — Terraform only
+# waits for the IAM API call to return, not for propagation.
+resource "time_sleep" "iam_propagation" {
+  depends_on = [
+    google_project_iam_member.workload_user,
+    google_project_iam_member.log_writer,
+    google_project_iam_member.ar_reader,
+  ]
+  create_duration = "120s"
 }
 
 resource "google_compute_firewall" "allow_http" {
@@ -102,7 +121,9 @@ resource "google_compute_instance" "cvm" {
     scopes = ["cloud-platform"]
   }
 
-  depends_on = [google_project_iam_member.workload_user]
+  # Wait out IAM propagation for the fresh service account; see
+  # time_sleep.iam_propagation above.
+  depends_on = [time_sleep.iam_propagation]
 }
 
 output "external_ip" {

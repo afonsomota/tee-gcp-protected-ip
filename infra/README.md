@@ -111,6 +111,17 @@ Gotchas hit on the way, now fixed in-tree:
   (set in `launcher/Dockerfile`). Without it the production image gives the
   container no usable stdout, the launcher's first `println!` aborts it, and
   the VM self-terminates ~0.1 s after launch with no container logs.
+- A fresh apply creates the workload service account, its IAM grants, and the
+  CVM essentially at once, but GCP IAM grants on new principals are eventually
+  consistent (can take a couple of minutes to propagate). If the CVM boots
+  first it can neither pull the image (`artifactregistry.reader`) nor write to
+  Cloud Logging (`logging.logWriter`), so it self-terminates after ~3 minutes
+  with **zero guest-side logs**. `infra/main.tf` works around this with a
+  `time_sleep.iam_propagation` (120 s) the CVM depends on. Distinguish the two
+  silent-failure modes by timing: a missing `log_redirect` label kills the VM
+  ~0.1 s after the container launches, the IAM race kills it ~3 minutes after
+  boot — and a plain `gcloud compute instances start` of the same VM later
+  comes up clean once IAM has settled.
 - `eat_nonce` in real tokens also carries the issue-003 `hpke:`/`tls:`
   key-binding entries; the verifier checks membership of its fresh nonce.
 
