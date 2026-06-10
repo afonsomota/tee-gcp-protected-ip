@@ -1,0 +1,131 @@
+/**
+ * In-browser attestation verification, with no server assistance:
+ *
+ *   1. token signature against Google's Confidential Space JWKS (jose);
+ *   2. our freshly generated challenge nonce is echoed in `eat_nonce`;
+ *   3. the workload image digest claim equals the expected (audited) digest;
+ *   4. the served HPKE public key hashes to the `hpke:<sha256>` entry that
+ *      the *enclave bound into the token at issuance* — this is what makes
+ *      the key trustworthy.
+ *
+ * Each failure mode carries a distinct `FailureCode` so tampered tokens,
+ * wrong images, and swapped keys are visibly different errors.
+ *
+ * Dev mode: the local launcher (no TEE hardware) serves an *unsigned* token
+ * with issuer `urn:tee-example:dev-unverified`. It is accepted only when
+ * `allowDevUnsigned` is set and is always flagged `signatureVerified: false`.
+ * Checks 2–4 run unchanged either way, so the same code path verifies a real
+ * Google-signed token against a real enclave.
+ */
+import { createRemoteJWKSet, decodeJwt, jwtVerify, type JWTPayload } from "jose";
+
+export const GOOGLE_OIDC_CONFIG_URL =
+  "https://confidentialcomputing.googleapis.com/.well-known/openid-configuration";
+export const DEV_ISSUER = "urn:tee-example:dev-unverified";
+
+export type FailureCode =
+  | "TOKEN_SIGNATURE_INVALID"
+  | "CHALLENGE_MISMATCH"
+  | "IMAGE_DIGEST_MISMATCH"
+  | "KEY_HASH_MISMATCH";
+
+export class AttestationError extends Error {
+  readonly code: FailureCode;
+
+  constructor(code: FailureCode, detail: string) {
+    super(`${code}: ${detail}`);
+    this.name = "AttestationError";
+    this.code = code;
+  }
+}
+
+/** The Confidential Space claims this page inspects. */
+export interface AttestationClaims extends JWTPayload {
+  eat_nonce?: string | string[];
+  submods?: { container?: { image_digest?: string } };
+}
+
+export interface VerifiedToken {
+  claims: AttestationClaims;
+  /** False only for dev-mode unsigned tokens — shown as a loud warning. */
+  signatureVerified: boolean;
+}
+
+/** `eat_nonce` is a string for one nonce, an array for several. */
+export function eatNonces(claims: AttestationClaims): string[] {
+  if (claims.eat_nonce === undefined) return [];
+  return Array.isArray(claims.eat_nonce) ? claims.eat_nonce : [claims.eat_nonce];
+}
+
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Step 1: decode and verify the token signature. Any signature, decoding, or
+ * audience problem maps to TOKEN_SIGNATURE_INVALID (the detail differs).
+ */
+export async function verifyTokenSignature(
+  token: string,
+  audience: string,
+  allowDevUnsigned: boolean,
+): Promise<VerifiedToken> {
+  let claims: AttestationClaims;
+  try {
+    claims = decodeJwt<AttestationClaims>(token);
+  } catch (err) {
+    throw new AttestationError("TOKEN_SIGNATURE_INVALID", `token does not decode: ${String(err)}`);
+  }
+  if (allowDevUnsigned && claims.iss === DEV_ISSUER) {
+    return { claims, signatureVerified: false };
+  }
+  try {
+    const config = (await (await fetch(GOOGLE_OIDC_CONFIG_URL)).json()) as { jwks_uri: string };
+    const jwks = createRemoteJWKSet(new URL(config.jwks_uri));
+    const { payload } = await jwtVerify<AttestationClaims>(token, jwks, { audience });
+    return { claims: payload, signatureVerified: true };
+  } catch (err) {
+    throw new AttestationError(
+      "TOKEN_SIGNATURE_INVALID",
+      `signature verification against Google JWKS failed: ${String(err)}`,
+    );
+  }
+}
+
+export interface ClaimChecks {
+  /** The nonce this page generated for this request (anti-replay). */
+  challenge: string;
+  /** The audited image digest the user expects to be running. */
+  expectedImageDigest: string;
+  /** Raw 32-byte X25519 public key served by GET /hpke-key. */
+  hpkePublicKey: Uint8Array;
+}
+
+/**
+ * Steps 2–4: challenge freshness, image digest, HPKE key binding.
+ * Throws AttestationError with a distinct code per failure mode.
+ */
+export async function checkClaims(claims: AttestationClaims, checks: ClaimChecks): Promise<void> {
+  const nonces = eatNonces(claims);
+  if (!nonces.includes(checks.challenge)) {
+    throw new AttestationError(
+      "CHALLENGE_MISMATCH",
+      `eat_nonce ${JSON.stringify(nonces)} does not echo our challenge "${checks.challenge}" — possible replay of an old token`,
+    );
+  }
+  const digest = claims.submods?.container?.image_digest;
+  if (digest !== checks.expectedImageDigest) {
+    throw new AttestationError(
+      "IMAGE_DIGEST_MISMATCH",
+      `token attests image "${digest ?? "<absent>"}" but expected "${checks.expectedImageDigest}" — this is NOT the audited workload`,
+    );
+  }
+  const binding = `hpke:${await sha256Hex(checks.hpkePublicKey)}`;
+  if (!nonces.includes(binding)) {
+    throw new AttestationError(
+      "KEY_HASH_MISMATCH",
+      `eat_nonce has no entry "${binding}" — the served HPKE key is NOT the key the enclave bound at attestation time`,
+    );
+  }
+}

@@ -2,11 +2,16 @@
 //! attestation-token endpoint. This is the seed of the audited TCB described
 //! in docs/DESIGN.md.
 
+mod hpke_channel;
+mod keys;
+
+use std::sync::Arc;
+
 use axum::{
-    extract::Query,
+    extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::Deserialize;
@@ -17,10 +22,24 @@ const TEE_SERVER_SOCKET: &str = "/run/container_launcher/teeserver.sock";
 /// Default audience baked into requested tokens; the verifier must expect it.
 const DEFAULT_AUDIENCE: &str = "https://tee-example/attestation";
 
-fn app() -> Router {
+#[derive(Clone)]
+pub struct AppState {
+    pub keys: Arc<keys::EnclaveKeys>,
+    /// Dev mode: serve an *unsigned* attestation-shaped token (see
+    /// `keys::EnclaveKeys::dev_token`) so the frontend can run locally.
+    pub dev: bool,
+}
+
+fn app(state: AppState) -> Router {
     Router::new()
         .route("/echo", get(echo))
         .route("/attestation", get(attestation))
+        .route("/hpke-key", get(hpke_channel::hpke_key))
+        .route("/hpke/echo", post(hpke_channel::hpke_echo))
+        // Attestation and the HPKE channel carry their own trust; the
+        // frontend is served from a different origin (GitHub Pages / Vite).
+        .layer(tower_http::cors::CorsLayer::permissive())
+        .with_state(state)
 }
 
 #[tokio::main]
@@ -29,11 +48,25 @@ async fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
+    let dev = std::env::args().any(|a| a == "--dev")
+        || std::env::var("LAUNCHER_DEV").is_ok_and(|v| v == "1");
+    let state = AppState {
+        keys: Arc::new(keys::EnclaveKeys::generate()),
+        dev,
+    };
+    println!(
+        "enclave key bindings: {} {}",
+        state.keys.hpke_nonce(),
+        state.keys.tls_nonce()
+    );
+    if dev {
+        println!("DEV MODE: /attestation serves an UNSIGNED, UNVERIFIED token");
+    }
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
         .expect("bind");
     println!("launcher listening on 0.0.0.0:{port}");
-    axum::serve(listener, app()).await.expect("serve");
+    axum::serve(listener, app(state)).await.expect("serve");
 }
 
 #[derive(Deserialize)]
@@ -50,7 +83,10 @@ struct AttestationParams {
     nonce: String,
 }
 
-async fn attestation(Query(params): Query<AttestationParams>) -> Response {
+async fn attestation(
+    State(state): State<AppState>,
+    Query(params): Query<AttestationParams>,
+) -> Response {
     // The attestation service requires nonces of 10..=74 bytes; reject early
     // with a clearer error than the service's own.
     if params.nonce.len() < 10 || params.nonce.len() > 74 {
@@ -61,7 +97,23 @@ async fn attestation(Query(params): Query<AttestationParams>) -> Response {
     }
     let audience =
         std::env::var("ATTESTATION_AUDIENCE").unwrap_or_else(|_| DEFAULT_AUDIENCE.to_string());
-    match fetch_attestation_token(&audience, &params.nonce).await {
+    if state.dev {
+        return Json(json!({
+            "token": state.keys.dev_token(&audience, &params.nonce),
+            "audience": audience,
+            "dev": true,
+            "warning": "DEV MODE: unsigned token, NOT verified by any hardware",
+        }))
+        .into_response();
+    }
+    // Key-hash binding: the caller's challenge plus both enclave public-key
+    // hashes ride as separate nonces (see keys.rs module docs for capacity).
+    let nonces = [
+        params.nonce.clone(),
+        state.keys.hpke_nonce(),
+        state.keys.tls_nonce(),
+    ];
+    match fetch_attestation_token(&audience, &nonces).await {
         Ok(token) => Json(json!({ "token": token, "audience": audience })).into_response(),
         Err(e) => error_response(StatusCode::SERVICE_UNAVAILABLE, &e),
     }
@@ -73,7 +125,7 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 
 /// POST to the Confidential Space launcher's attestation service over its
 /// Unix socket and return the OIDC token (a JWT) it mints.
-async fn fetch_attestation_token(audience: &str, nonce: &str) -> Result<String, String> {
+async fn fetch_attestation_token(audience: &str, nonces: &[String]) -> Result<String, String> {
     use http_body_util::BodyExt;
 
     if !std::path::Path::new(TEE_SERVER_SOCKET).exists() {
@@ -93,7 +145,7 @@ async fn fetch_attestation_token(audience: &str, nonce: &str) -> Result<String, 
     let body = json!({
         "audience": audience,
         "token_type": "OIDC",
-        "nonces": [nonce],
+        "nonces": nonces,
     })
     .to_string();
     let request = hyper::Request::post("/v1/token")
@@ -128,14 +180,25 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    async fn get_json(uri: &str) -> (StatusCode, serde_json::Value) {
-        let response = app()
+    fn test_state(dev: bool) -> AppState {
+        AppState {
+            keys: Arc::new(keys::EnclaveKeys::generate()),
+            dev,
+        }
+    }
+
+    async fn get_json_with(state: AppState, uri: &str) -> (StatusCode, serde_json::Value) {
+        let response = app(state)
             .oneshot(Request::get(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
         let status = response.status();
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    async fn get_json(uri: &str) -> (StatusCode, serde_json::Value) {
+        get_json_with(test_state(false), uri).await
     }
 
     #[tokio::test]
@@ -166,5 +229,43 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         let msg = body["error"].as_str().unwrap();
         assert!(msg.contains("not running in Confidential Space"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn dev_mode_serves_unsigned_token_with_key_bindings() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
+        let state = test_state(true);
+        let keys = state.keys.clone();
+        let (status, body) = get_json_with(state, "/attestation?nonce=0123456789abcdef").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["dev"], true);
+
+        let token = body["token"].as_str().unwrap();
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        assert!(parts[2].is_empty(), "dev token must be unsigned");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+        assert_eq!(payload["iss"], "urn:tee-example:dev-unverified");
+        let nonces: Vec<&str> = payload["eat_nonce"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            nonces,
+            vec![
+                "0123456789abcdef".to_string(),
+                keys.hpke_nonce(),
+                keys.tls_nonce()
+            ]
+        );
+        // Every bound nonce must satisfy the attestation service limits.
+        for nonce in nonces {
+            assert!((10..=74).contains(&nonce.len()), "{nonce}");
+        }
     }
 }

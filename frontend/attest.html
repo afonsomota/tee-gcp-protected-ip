@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Attestation Test Page</title>
+    <style>
+      body { font: 14px/1.5 ui-monospace, monospace; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; background: #111; color: #ddd; }
+      h1 { font-size: 1.2rem; }
+      label { display: block; margin-top: 0.6rem; }
+      input { width: 100%; box-sizing: border-box; padding: 0.3rem; font: inherit; background: #222; color: #ddd; border: 1px solid #444; }
+      .buttons { margin: 1rem 0; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+      button { font: inherit; padding: 0.4rem 0.8rem; cursor: pointer; border: 1px solid #555; background: #2a2a2a; color: #ddd; }
+      button.sabotage { border-color: #844; }
+      .badge { display: inline-block; padding: 0.3rem 0.8rem; border: 1px solid #555; margin-left: 0.5rem; }
+      .badge.good { background: #143; border-color: #2a6; }
+      .badge.dev { background: #431; border-color: #a62; }
+      .badge.bad { background: #411; border-color: #a33; }
+      #log { border: 1px solid #333; padding: 0.6rem; min-height: 8rem; max-height: 24rem; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+      .line.ok { color: #6c6; }
+      .line.warn { color: #ca5; }
+      .line.fail { color: #e66; font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    <h1>Attestation test page <span id="badge" class="badge">idle</span></h1>
+    <p>
+      Verifies the enclave's attestation token in this browser (Google JWKS
+      signature, image digest, HPKE key binding), pins the key, then
+      round-trips an HPKE-encrypted echo. Against a local
+      <code>launcher --dev</code> the token is unsigned and loudly marked
+      unverified; the same checks run unchanged against a real enclave.
+    </p>
+    <label>Launcher URL <input id="launcher-url" value="http://localhost:8080" /></label>
+    <label>Expected image digest
+      <input id="expected-digest" value="sha256:dev-mode-unverified-image-digest" />
+    </label>
+    <label>Token audience <input id="audience" value="https://tee-example/attestation" /></label>
+    <label>Echo message <input id="message" value="hello enclave" /></label>
+    <div class="buttons">
+      <button id="run">Verify &amp; echo</button>
+      <button id="run-tampered" class="sabotage">Test: tampered token</button>
+      <button id="run-wrong-digest" class="sabotage">Test: wrong digest</button>
+      <button id="run-wrong-key" class="sabotage">Test: mismatched key hash</button>
+    </div>
+    <div id="log"></div>
+    <script type="module" src="/src/attest/main.ts"></script>
+  </body>
+</html>
