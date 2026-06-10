@@ -1,0 +1,249 @@
+//! TLS terminated inside the enclave (issue 004).
+//!
+//! When `TLS_DOMAIN` is set the launcher serves HTTPS directly: rustls-acme
+//! obtains and renews a Let's Encrypt certificate via the TLS-ALPN-01
+//! challenge (no port 80, no proxy, no load balancer — the TLS private key
+//! never exists outside enclave memory). Account and certificate state
+//! persist across boots as KMS-wrapped blobs in GCS (`sealed_cache.rs` +
+//! `gcp.rs`), so VM recreation reuses the same cert instead of re-issuing.
+//!
+//! Outbound TLS to the ACME directory uses compiled-in `webpki-roots`
+//! (rustls-acme is built with its `webpki-roots` feature): the runtime image
+//! is `scratch` with no CA bundle, so filesystem trust discovery would fail.
+//!
+//! Threat model: TLS here is defense-in-depth and ordinary web hygiene; the
+//! user-facing privacy guarantee rides on the attested HPKE channel, not on
+//! the certificate authority ecosystem. See docs/DESIGN.md.
+//!
+//! # Configuration (environment)
+//!
+//! | Variable            | Meaning                                              |
+//! |---------------------|------------------------------------------------------|
+//! | `TLS_DOMAIN`        | Domain to serve/order a cert for; unset = plain HTTP |
+//! | `ACME_CONTACT`      | Contact email for the ACME account (required)        |
+//! | `ACME_STATE_BUCKET` | GCS bucket for the sealed state (required)           |
+//! | `ACME_KMS_KEY`      | Full KMS key resource wrapping the state (required)  |
+//! | `ACME_DIRECTORY`    | `letsencrypt`, `letsencrypt-staging` (default), or a directory URL |
+//! | `ACME_WIP_AUDIENCE` | Workload-identity-pool provider audience for attested KMS access (optional; metadata SA token if unset) |
+//! | `HTTPS_PORT`        | Listen port, default 443                             |
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use futures_util::StreamExt;
+use rustls_acme::AcmeConfig;
+
+use crate::sealed_cache::SealedCache;
+use crate::{gcp, AppState};
+
+pub const LETS_ENCRYPT_PRODUCTION: &str = "https://acme-v02.api.letsencrypt.org/directory";
+pub const LETS_ENCRYPT_STAGING: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
+#[derive(Debug, PartialEq)]
+pub struct TlsConfig {
+    pub domain: String,
+    pub contact: String,
+    pub bucket: String,
+    pub kms_key: String,
+    pub directory_url: String,
+    pub wip_audience: Option<String>,
+    pub https_port: u16,
+}
+
+impl TlsConfig {
+    /// `Ok(None)` when TLS is disabled (`TLS_DOMAIN` unset); `Err` when it is
+    /// enabled but incoherently configured — refuse to boot half-configured.
+    pub fn from_env() -> Result<Option<Self>, String> {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
+        let nonempty = |name: &str| get(name).filter(|value| !value.is_empty());
+        let Some(domain) = nonempty("TLS_DOMAIN") else {
+            return Ok(None);
+        };
+        let require = |name: &str| {
+            nonempty(name).ok_or(format!("TLS_DOMAIN is set but {name} is missing or empty"))
+        };
+        let directory_url = match nonempty("ACME_DIRECTORY").as_deref() {
+            None | Some("letsencrypt-staging") => LETS_ENCRYPT_STAGING.to_string(),
+            Some("letsencrypt") => LETS_ENCRYPT_PRODUCTION.to_string(),
+            Some(url) if url.starts_with("https://") => url.to_string(),
+            Some(other) => {
+                return Err(format!(
+                    "ACME_DIRECTORY must be `letsencrypt`, `letsencrypt-staging`, \
+                     or an https:// directory URL, got `{other}`"
+                ))
+            }
+        };
+        let https_port = match get("HTTPS_PORT") {
+            None => 443,
+            Some(p) => p
+                .parse()
+                .map_err(|_| format!("HTTPS_PORT is not a valid port: `{p}`"))?,
+        };
+        Ok(Some(Self {
+            domain,
+            contact: require("ACME_CONTACT")?,
+            bucket: require("ACME_STATE_BUCKET")?,
+            kms_key: require("ACME_KMS_KEY")?,
+            directory_url,
+            wip_audience: nonempty("ACME_WIP_AUDIENCE"),
+            https_port,
+        }))
+    }
+}
+
+/// Serve the app over HTTPS, never returning. TLS-ALPN-01 challenge
+/// handshakes are answered on the same port by the acceptor.
+pub async fn serve(state: AppState, config: TlsConfig) {
+    let cache = SealedCache::new(
+        gcp::GcsBlobStore::new(config.bucket.clone()),
+        gcp::KmsSealer::new(config.kms_key.clone(), config.wip_audience.clone()),
+        Arc::clone(&state.keys),
+    );
+    let mut acme = AcmeConfig::new([config.domain.clone()])
+        .contact_push(format!("mailto:{}", config.contact))
+        .directory(&config.directory_url)
+        .cache(cache)
+        .state();
+    let acceptor = acme.axum_acceptor(acme.default_rustls_config());
+    tokio::spawn(async move {
+        // Drive ACME: cache loads, orders, renewals. Events are the audit
+        // trail of every cert/account state change.
+        loop {
+            match acme.next().await {
+                Some(Ok(event)) => println!("acme event: {event:?}"),
+                Some(Err(error)) => eprintln!("acme error: {error:?}"),
+                None => break,
+            }
+        }
+    });
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.https_port));
+    println!(
+        "launcher serving https://{} on {addr} (acme directory: {})",
+        config.domain, config.directory_url
+    );
+    axum_server::bind(addr)
+        .acceptor(acceptor)
+        .serve(crate::app(state).into_make_service())
+        .await
+        .expect("https serve");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name: &str| map.get(name).cloned()
+    }
+
+    const FULL: &[(&str, &str)] = &[
+        ("TLS_DOMAIN", "api.example.com"),
+        ("ACME_CONTACT", "ops@example.com"),
+        ("ACME_STATE_BUCKET", "proj-acme-state"),
+        (
+            "ACME_KMS_KEY",
+            "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+        ),
+    ];
+
+    #[test]
+    fn no_domain_means_tls_disabled() {
+        assert_eq!(TlsConfig::from_lookup(lookup(&[])).unwrap(), None);
+        // Other vars without a domain still mean disabled.
+        let partial = lookup(&[("ACME_CONTACT", "ops@example.com")]);
+        assert_eq!(TlsConfig::from_lookup(partial).unwrap(), None);
+        // Empty string counts as unset.
+        let empty = lookup(&[("TLS_DOMAIN", "")]);
+        assert_eq!(TlsConfig::from_lookup(empty).unwrap(), None);
+    }
+
+    #[test]
+    fn full_config_parses_with_safe_defaults() {
+        let config = TlsConfig::from_lookup(lookup(FULL)).unwrap().unwrap();
+        assert_eq!(config.domain, "api.example.com");
+        assert_eq!(config.contact, "ops@example.com");
+        assert_eq!(config.bucket, "proj-acme-state");
+        assert_eq!(
+            config.kms_key,
+            "projects/p/locations/l/keyRings/r/cryptoKeys/k"
+        );
+        // Defaults: staging directory (rate-limit safety) and port 443.
+        assert_eq!(config.directory_url, LETS_ENCRYPT_STAGING);
+        assert_eq!(config.https_port, 443);
+        assert_eq!(config.wip_audience, None);
+    }
+
+    #[test]
+    fn missing_required_var_is_a_boot_error() {
+        for missing in ["ACME_CONTACT", "ACME_STATE_BUCKET", "ACME_KMS_KEY"] {
+            let pairs: Vec<(&str, &str)> = FULL
+                .iter()
+                .copied()
+                .filter(|(k, _)| *k != missing)
+                .collect();
+            let err = TlsConfig::from_lookup(lookup(&pairs)).unwrap_err();
+            assert!(err.contains(missing), "{err}");
+        }
+    }
+
+    #[test]
+    fn directory_selector_accepts_names_and_urls() {
+        let with = |dir: &str| {
+            let mut pairs = FULL.to_vec();
+            let owned = dir.to_string();
+            let pairs_owned: Vec<(String, String)> = pairs
+                .drain(..)
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .chain(std::iter::once(("ACME_DIRECTORY".to_string(), owned)))
+                .collect();
+            let map: HashMap<String, String> = pairs_owned.into_iter().collect();
+            TlsConfig::from_lookup(move |name| map.get(name).cloned())
+        };
+        assert_eq!(
+            with("letsencrypt").unwrap().unwrap().directory_url,
+            LETS_ENCRYPT_PRODUCTION
+        );
+        assert_eq!(
+            with("letsencrypt-staging").unwrap().unwrap().directory_url,
+            LETS_ENCRYPT_STAGING
+        );
+        assert_eq!(
+            with("https://pebble.local/dir")
+                .unwrap()
+                .unwrap()
+                .directory_url,
+            "https://pebble.local/dir"
+        );
+        assert!(with("http://insecure/dir").is_err());
+        assert!(with("bogus").is_err());
+    }
+
+    #[test]
+    fn wip_audience_and_port_are_honored() {
+        let mut pairs = FULL.to_vec();
+        pairs.push((
+            "ACME_WIP_AUDIENCE",
+            "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/v",
+        ));
+        pairs.push(("HTTPS_PORT", "8443"));
+        let config = TlsConfig::from_lookup(lookup(&pairs)).unwrap().unwrap();
+        assert_eq!(
+            config.wip_audience.as_deref(),
+            Some("//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/v")
+        );
+        assert_eq!(config.https_port, 8443);
+
+        let mut bad = FULL.to_vec();
+        bad.push(("HTTPS_PORT", "not-a-port"));
+        assert!(TlsConfig::from_lookup(lookup(&bad)).is_err());
+    }
+}

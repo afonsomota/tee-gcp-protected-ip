@@ -57,6 +57,19 @@ tool-calls — all of which go to the user.
 **Company IP rests on:** KMS attestation-gated key release (Google IAM is in
 the *IP* TCB, not the *privacy* TCB).
 
+**TLS is defense-in-depth; HPKE carries the trust.** The enclave terminates
+TLS itself (rustls-acme, TLS-ALPN-01; the private key never leaves enclave
+memory, and the serving key's SPKI hash is bound into the attestation token
+as the `tls:` eat_nonce). But a mis-issued or CA-compromised certificate
+gains an attacker nothing beyond what plain HTTP would: every payload is
+HPKE-sealed to the attestation-verified enclave key, so user privacy does not
+rest on the WebPKI. TLS exists for ordinary web hygiene (browser padlock,
+mixed-content rules, casual snooping) and to protect *metadata* in transit.
+The sealed ACME state (account key + cert) is KMS-wrapped in GCS and
+unwrappable only by attested workloads of the pinned image digest; its
+compromise would therefore also only degrade defense-in-depth, never the
+HPKE channel.
+
 **Explicitly out of scope / documented caveats:** side-channel attacks;
 compromised user device/browser extensions; frontend TOFU (mitigated by
 local-run option); Google could in principle issue attestation tokens
@@ -72,8 +85,12 @@ falsely (platform trust); model-output IP leakage (distillation).
    structure).
 3. **Memory fit**: Gemma 4 E2B (Q4) + EmbeddingGemma + launcher on
    `n2d-standard-4` (16 GB); bump to `-8` if tight.
-4. **ACME at boot**: KMS-wrapped cert-state unwrap must complete before
-   first TLS accept; check LE rate limits for the restart story.
+4. **ACME at boot**: implemented in issue 004 (`launcher/src/tls.rs`): the
+   sealed cert state is unwrapped via `load_cert` before rustls-acme deploys
+   any certificate, and until one is deployed TLS handshakes simply fail —
+   no plaintext window. Restarts reuse the cached cert, so Let's Encrypt
+   rate limits only apply to genuinely new issuance. Live verification
+   against a real domain still pending.
 5. **hpke-js / WebCrypto** interop with the Rust `hpke` crate (suite choice:
    X25519-HKDF-SHA256 / ChaCha20-Poly1305).
 6. **Weights provisioning**: Terraform/script downloads Gemma from HF with the

@@ -22,5 +22,11 @@ COPY --from=build /src/target/x86_64-unknown-linux-musl/release/launcher /launch
 # Logging on the production image (default is debug-only; without it stdout
 # is unavailable and the first println! kills the workload).
 LABEL "tee.launch_policy.log_redirect"="always"
-EXPOSE 8080
+# Env vars the operator may set via tee-env-* VM metadata (issue 004 TLS).
+# Deliberately narrow: only the ACME/TLS wiring is overridable, and none of
+# it can weaken the user-privacy story — TLS is defense-in-depth, the trust
+# rides on HPKE + attestation, and the digest in the KMS IAM binding pins
+# which image can unwrap the sealed cert state.
+LABEL "tee.launch_policy.allow_env_override"="TLS_DOMAIN,ACME_CONTACT,ACME_DIRECTORY,ACME_STATE_BUCKET,ACME_KMS_KEY,ACME_WIP_AUDIENCE,HTTPS_PORT"
+EXPOSE 8080 443
 ENTRYPOINT ["/launcher"]

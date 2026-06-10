@@ -2,8 +2,11 @@
 //!
 //! At boot the launcher generates:
 //!   * an X25519 HPKE keypair — the channel key the frontend encrypts to;
-//!   * a TLS keypair — generated and hashed now so the binding format is
-//!     fixed from day one; actual TLS serving (rustls-acme) is issue 004.
+//!   * a placeholder TLS keypair, hashed so the binding format is fixed even
+//!     before a certificate exists. When TLS serving is enabled (`tls.rs`),
+//!     the binding is replaced with the SPKI of the ACME-issued certificate's
+//!     key as soon as it is loaded from the sealed cache or freshly ordered,
+//!     so attestation tokens always hash the key actually serving TLS.
 //!
 //! # Binding encoding (resolves DESIGN.md open spike #2)
 //!
@@ -38,10 +41,9 @@ pub const DEV_IMAGE_DIGEST: &str = "sha256:dev-mode-unverified-image-digest";
 pub struct EnclaveKeys {
     hpke_private: <X25519HkdfSha256 as KemTrait>::PrivateKey,
     hpke_public: <X25519HkdfSha256 as KemTrait>::PublicKey,
-    /// Held for issue 004 (TLS serving); only its public-key hash is used now.
-    #[allow(dead_code)]
-    tls_key: rcgen::KeyPair,
-    tls_spki_der: Vec<u8>,
+    /// SPKI DER of the key currently bound as `tls:`. Starts as a per-boot
+    /// placeholder; replaced by `set_tls_spki` when an ACME cert is active.
+    tls_spki_der: std::sync::RwLock<Vec<u8>>,
 }
 
 impl EnclaveKeys {
@@ -50,13 +52,11 @@ impl EnclaveKeys {
     pub fn generate() -> Self {
         let mut csprng = <rand::rngs::StdRng as rand::SeedableRng>::from_os_rng();
         let (hpke_private, hpke_public) = X25519HkdfSha256::gen_keypair(&mut csprng);
-        let tls_key = rcgen::KeyPair::generate().expect("TLS keypair generation");
-        let tls_spki_der = tls_key.subject_public_key_info();
+        let tls_placeholder = rcgen::KeyPair::generate().expect("TLS keypair generation");
         Self {
             hpke_private,
             hpke_public,
-            tls_key,
-            tls_spki_der,
+            tls_spki_der: std::sync::RwLock::new(tls_placeholder.subject_public_key_info()),
         }
     }
 
@@ -79,7 +79,15 @@ impl EnclaveKeys {
 
     /// `"tls:<sha256 hex of SubjectPublicKeyInfo DER>"` — 68 bytes.
     pub fn tls_nonce(&self) -> String {
-        format!("tls:{}", hex::encode(Sha256::digest(&self.tls_spki_der)))
+        let spki = self.tls_spki_der.read().expect("tls spki lock");
+        format!("tls:{}", hex::encode(Sha256::digest(&*spki)))
+    }
+
+    /// Rebind `tls:` to a new key, identified by its SubjectPublicKeyInfo
+    /// DER. Called by the sealed ACME cache whenever a certificate is loaded
+    /// or stored, so tokens minted afterwards hash the serving cert's key.
+    pub fn set_tls_spki(&self, spki_der: Vec<u8>) {
+        *self.tls_spki_der.write().expect("tls spki lock") = spki_der;
     }
 
     /// An *unsigned* attestation-shaped JWT for local development, where no
@@ -112,5 +120,33 @@ impl EnclaveKeys {
             URL_SAFE_NO_PAD.encode(header.to_string()),
             URL_SAFE_NO_PAD.encode(payload.to_string()),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonces_are_self_describing_and_fit_the_attestation_limits() {
+        let keys = EnclaveKeys::generate();
+        for nonce in [keys.hpke_nonce(), keys.tls_nonce()] {
+            assert!((10..=74).contains(&nonce.len()), "{nonce}");
+        }
+        assert!(keys.hpke_nonce().starts_with("hpke:"));
+        assert!(keys.tls_nonce().starts_with("tls:"));
+    }
+
+    #[test]
+    fn set_tls_spki_rebinds_the_tls_nonce() {
+        let keys = EnclaveKeys::generate();
+        let before = keys.tls_nonce();
+        let spki = b"example spki der bytes".to_vec();
+        keys.set_tls_spki(spki.clone());
+        let after = keys.tls_nonce();
+        assert_ne!(after, before);
+        assert_eq!(after, format!("tls:{}", hex::encode(Sha256::digest(&spki))));
+        // HPKE binding is untouched by TLS rebinds.
+        assert_eq!(keys.hpke_nonce(), keys.hpke_nonce());
     }
 }
