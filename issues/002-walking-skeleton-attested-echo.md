@@ -3,7 +3,7 @@ id: 002
 title: "Walking skeleton: attested echo enclave on Confidential Space"
 type: AFK
 labels: [ready]
-status: needs-review
+status: done
 ---
 
 > **Status note (2026-06-10, live run):** Live cloud run completed against
@@ -18,8 +18,8 @@ status: needs-review
 > `println!` kills the container ("Workload completed" ~0.1s after launch,
 > no logs). Verifier updated for issue 003's `hpke:`/`tls:` key-binding
 > entries in `eat_nonce` (membership check; pytest 8/8). `terraform destroy`
-> of the infra root is pending human approval (permission gate); exact
-> command in `infra/README.md` step 7.
+> of the infra root completed cleanly (run by Afonso; state empty, instance,
+> firewall, IAM and service account all gone — bootstrap root kept by design).
 
 > **Status note (2026-06-10):** Implemented in `launcher/`, `infra/`, `scripts/`.
 > All local checks pass (cargo fmt/clippy/test, terraform validate both roots,
@@ -45,12 +45,12 @@ stage — attested builds come later (issue 012).
 
 ## Acceptance criteria
 
-- [ ] `terraform apply` from a clean GCP project brings up the CVM running the container
-- [ ] `/echo` responds over HTTP on the VM's external IP
-- [ ] Workload obtains an attestation token with a caller-supplied `eat_nonce`
-- [ ] Verifier CLI validates token signature + image digest and prints a clear pass/fail
-- [ ] `terraform destroy` tears everything down cleanly
-- [ ] README section documents the one-time GCP project setup (APIs, workload identity pool)
+- [x] `terraform apply` from a clean GCP project brings up the CVM running the container
+- [x] `/echo` responds over HTTP on the VM's external IP
+- [x] Workload obtains an attestation token with a caller-supplied `eat_nonce`
+- [x] Verifier CLI validates token signature + image digest and prints a clear pass/fail
+- [x] `terraform destroy` tears everything down cleanly
+- [x] README section documents the one-time GCP project setup (APIs, workload identity pool)
 
 ## Blocked by
 
