@@ -1,0 +1,199 @@
+# Reproducible launcher release (issue 012, spike 001).
+#
+# Tagging v* runs the deterministic build recipe (scripts/build-image.sh,
+# the same `make image` any verifier runs) twice, on two independent runner
+# VMs that share no state, and blocks the release unless both derive the
+# identical image manifest digest D. Only then is the image pushed by digest
+# to Artifact Registry and a GitHub artifact attestation published.
+#
+# Trust model (see README.md): GitHub is NOT a trust anchor here — a
+# compromised CI would produce a digest that any independent rebuild from
+# the tagged source fails to re-derive. The cross-rebuild job continuously
+# proves the recipe stays reproducible; outside rebuilds provide detection.
+#
+# Optional repo configuration for the registry push + image attestation
+# (Settings -> Secrets and variables -> Actions -> Variables). If unset,
+# those steps are skipped and the release carries only D + the OCI tarball:
+#   GCP_WORKLOAD_IDENTITY_PROVIDER  projects/../workloadIdentityPools/../providers/..
+#   GCP_RELEASE_SERVICE_ACCOUNT     SA email with artifactregistry.writer
+#   GCP_PROJECT_ID                  target project
+#   GCP_REGION                      Artifact Registry region (default europe-west4)
+#   GCP_REPOSITORY                  Artifact Registry repo id (default tee-example)
+name: Release launcher image
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # dry run: build + cross-check only, nothing published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Canonical build
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deterministic image build (make image)
+        run: make image
+
+      - name: Record digest
+        id: digest
+        run: |
+          digest=$(cat dist/image-digest.txt)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Canonical build digest: \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package OCI layout for release artifact
+        run: tar -C dist -czf launcher-image-oci.tar.gz oci-layout
+
+      - name: Upload build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-image
+          path: |
+            launcher-image-oci.tar.gz
+            dist/image-digest.txt
+            dist/release-pins.txt
+          if-no-files-found: error
+
+  # Independent re-derivation of D on a separate runner VM, from the same
+  # commit. Shares nothing with the canonical build job — fresh checkout,
+  # fresh toolchain download, fresh build. Release-blocking via `compare`.
+  rebuild:
+    name: Independent cross-rebuild
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deterministic image build (make image)
+        run: make image
+
+      - name: Record digest
+        id: digest
+        run: |
+          digest=$(cat dist/image-digest.txt)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Cross-rebuild digest: \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+
+  compare:
+    name: Reproducibility gate
+    needs: [build, rebuild]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert identical digests
+        env:
+          BUILD_DIGEST: ${{ needs.build.outputs.digest }}
+          REBUILD_DIGEST: ${{ needs.rebuild.outputs.digest }}
+        run: |
+          echo "canonical:     $BUILD_DIGEST"
+          echo "cross-rebuild: $REBUILD_DIGEST"
+          if [ -z "$BUILD_DIGEST" ] || [ "$BUILD_DIGEST" != "$REBUILD_DIGEST" ]; then
+            echo "::error::Digest mismatch — build is not reproducible; blocking release."
+            exit 1
+          fi
+          echo "Reproducibility gate PASSED: \`$BUILD_DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish release
+    needs: [build, rebuild, compare]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # GCP workload identity federation + sigstore
+      attestations: write # GitHub artifact attestation
+    env:
+      DIGEST: ${{ needs.build.outputs.digest }}
+      GCP_REGION: ${{ vars.GCP_REGION || 'europe-west4' }}
+      GCP_REPOSITORY: ${{ vars.GCP_REPOSITORY || 'tee-example' }}
+    steps:
+      - name: Download build outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: launcher-image
+
+      - name: Authenticate to GCP
+        id: gcp-auth
+        if: vars.GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASE_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Push image by digest to Artifact Registry
+        id: push
+        if: vars.GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+        env:
+          ACCESS_TOKEN: ${{ steps.gcp-auth.outputs.access_token }}
+          IMAGE_REPO: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${{ env.GCP_REPOSITORY }}/launcher
+        run: |
+          curl -fsSL https://github.com/google/go-containerregistry/releases/download/v0.21.6/go-containerregistry_Linux_x86_64.tar.gz -o crane.tar.gz
+          echo "7ebbdcd05b652345c1f5105f8475e518534b90d66f3bdb50017be63f426ea435  crane.tar.gz" | sha256sum -c -
+          tar -xzf crane.tar.gz crane
+          ./crane auth login "${GCP_REGION}-docker.pkg.dev" -u oauth2accesstoken -p "$ACCESS_TOKEN"
+          tar -xzf launcher-image-oci.tar.gz
+          ./crane push oci-layout "$IMAGE_REPO:${{ github.ref_name }}"
+          pushed=$(./crane digest "$IMAGE_REPO:${{ github.ref_name }}")
+          echo "pushed:   $pushed"
+          echo "expected: $DIGEST"
+          test "$pushed" = "$DIGEST"
+          echo "image-repo=$IMAGE_REPO" >> "$GITHUB_OUTPUT"
+          echo "Pushed \`$IMAGE_REPO@$pushed\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish artifact attestation (convenience tier)
+        if: vars.GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.push.outputs.image-repo }}
+          subject-digest: ${{ env.DIGEST }}
+          push-to-registry: true
+
+      - name: Note skipped registry publication
+        if: vars.GCP_WORKLOAD_IDENTITY_PROVIDER == ''
+        run: echo "::warning::GCP_WORKLOAD_IDENTITY_PROVIDER not configured — release carries the digest and OCI tarball only; no registry push or image attestation."
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "## Launcher image"
+            echo
+            echo "**Image manifest digest D:** \`$DIGEST\`"
+            echo
+            echo "Built deterministically and independently re-derived on a"
+            echo "separate runner (release-blocking gate). Rebuild it yourself"
+            echo "from this tag and compare:"
+            echo
+            echo '```sh'
+            echo "git checkout ${{ github.ref_name }} && make image && make digest"
+            echo '```'
+            echo
+            echo "### Pinned build inputs"
+            echo
+            echo '```'
+            cat dist/release-pins.txt
+            echo '```'
+          } > notes.md
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --notes-file notes.md \
+            --verify-tag \
+            launcher-image-oci.tar.gz \
+            dist/image-digest.txt \
+            dist/release-pins.txt
