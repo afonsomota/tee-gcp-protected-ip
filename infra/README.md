@@ -8,8 +8,14 @@ Two Terraform roots:
 
 | Root | Purpose | Lifecycle |
 |---|---|---|
-| `infra/bootstrap/` | Required APIs + Artifact Registry repo | Apply **once** per project, never destroy |
+| `infra/bootstrap/` | Required APIs + Artifact Registry repo + static external IP | Apply **once** per project, never destroy |
 | `infra/` | Service account, firewall, the CVM itself | Apply/destroy per deployment |
+
+The static IP lives in bootstrap so the CVM comes back on the **same address**
+after every destroy/apply cycle — DNS pointed at it never goes stale. The main
+root finds it by name (`data "google_compute_address"`), so neither root reads
+the other's Terraform state. A reserved regional IP is free while attached to
+a running instance and accrues a small idle charge while the CVM is destroyed.
 
 ## One-time GCP project setup
 
@@ -33,7 +39,28 @@ terraform -chdir=infra/bootstrap apply -var project_id=YOUR_PROJECT_ID -var regi
 ```sh
 gcloud services enable compute.googleapis.com confidentialcomputing.googleapis.com artifactregistry.googleapis.com
 gcloud artifacts repositories create tee-example --repository-format=docker --location=europe-west4
+gcloud compute addresses create tee-example-cvm --region=europe-west4
 ```
+
+Already bootstrapped before the static IP existed? Re-run the bootstrap apply
+(it only adds the address; existing resources are untouched).
+
+### DNS for the enclave API
+
+Point a subdomain at the static IP with an **A record** (at your DNS
+provider; nothing in Terraform manages this):
+
+```
+api.<domain>.  300  IN  A  <static IP>   # IP: terraform -chdir=infra/bootstrap output -raw cvm_ip
+```
+
+Keep the TTL low (~300 s) while iterating; raise it once the setup is stable.
+The IP survives `terraform -chdir=infra destroy`/`apply`, so this record is
+set once and stays valid across redeployments.
+
+The frontend's custom domain is a separate concern: it's a CNAME to
+`<user>.github.io` configured through GitHub Pages (issue #13), not anything
+in `infra/`.
 
 ### Workload identity pool — not needed yet
 
@@ -83,6 +110,8 @@ terraform -chdir=infra apply \
 IP=$(terraform -chdir=infra output -raw external_ip)
 # Boot takes a couple of minutes (image pull + container start).
 curl "http://$IP:8080/echo?msg=hello"
+# …or, once the A record is in place:
+curl "http://api.YOUR_DOMAIN:8080/echo?msg=hello"
 ./scripts/verify-attestation.py --url "http://$IP:8080" --image-digest sha256:DIGEST_FROM_ABOVE
 
 terraform -chdir=infra destroy \
