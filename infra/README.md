@@ -90,24 +90,29 @@ The verifier generates a fresh random nonce, fetches the token from
 JWKS, and checks issuer, audience, `eat_nonce`, and
 `submods.container.image_digest`, printing PASS/FAIL per check.
 
-Debugging tips: set `-var confidential_space_image_family=confidential-space-debian-dbg`
+Debugging tips: set `-var confidential_space_image_family=confidential-space-debug`
 to get an SSH-able debug image, and check serial port 1 / Cloud Logging for
 container logs (`tee-container-log-redirect=true` is set).
 
 ## Live run
 
-The end-to-end cloud run is **deferred to a human**: this machine's GCP
-application-default credentials fail with `invalid_grant: Bad Request`
-(expired/revoked refresh token; re-auth is interactive-only), and the one
-account with a live user token (`af.oliveira.16@gmail.com`) has no IAM
-permissions on the project. No cloud resources were created by the agent runs
-— there is nothing to clean up.
+Completed 2026-06-10 against project `tees-499001`: `/echo` responded and the
+verifier printed `RESULT: PASS` on the production Confidential Space image.
+Gotchas hit on the way, now fixed in-tree:
 
-Exact ordered commands for the human run (from the repo root; substitute your
-project ID, e.g. `angular-yen-432616-r6`):
+- The image families are `confidential-space` / `confidential-space-debug`
+  (the previous `confidential-space-debian*` defaults don't exist).
+- The workload image must carry `LABEL tee.launch_policy.log_redirect=always`
+  (set in `launcher/Dockerfile`). Without it the production image gives the
+  container no usable stdout, the launcher's first `println!` aborts it, and
+  the VM self-terminates ~0.1 s after launch with no container logs.
+- `eat_nonce` in real tokens also carries the issue-003 `hpke:`/`tls:`
+  key-binding entries; the verifier checks membership of its fresh nonce.
+
+Ordered commands (from the repo root; substitute your project ID):
 
 ```sh
-# 1. Re-authenticate (interactive)
+# 1. Authenticate (interactive)
 gcloud auth login
 gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID

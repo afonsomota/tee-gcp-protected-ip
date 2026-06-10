@@ -70,12 +70,14 @@ def check_claims(
     nonces = claims.get("eat_nonce")
     if isinstance(nonces, str):  # single nonce may be flattened to a string
         nonces = [nonces]
+    # The launcher also binds enclave keys into eat_nonce as "hpke:..." /
+    # "tls:..." entries (issue 003); freshness only needs our nonce present.
     return [
         ("issuer", claims.get("iss") == EXPECTED_ISSUER,
          f"iss={claims.get('iss')!r}"),
         ("audience", claims.get("aud") == expected_audience,
          f"aud={claims.get('aud')!r}"),
-        ("eat_nonce", nonces == [expected_nonce],
+        ("eat_nonce", nonces is not None and expected_nonce in nonces,
          f"eat_nonce={nonces!r}"),
         ("image_digest", image_digest == expected_digest,
          f"submods.container.image_digest={image_digest!r}"),

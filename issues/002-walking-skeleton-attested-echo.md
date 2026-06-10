@@ -6,6 +6,21 @@ labels: [ready]
 status: needs-review
 ---
 
+> **Status note (2026-06-10, live run):** Live cloud run completed against
+> project `tees-499001`: bootstrap apply, image build+push, CVM apply, `/echo`
+> OK, verifier `RESULT: PASS` (signature, issuer, audience, nonce, image
+> digest) on the **production** Confidential Space image. Three fixes were
+> needed: (1) image family names corrected to `confidential-space` /
+> `confidential-space-debug` (old `confidential-space-debian*` defaults don't
+> exist); (2) Dockerfile builder bumped to rust:1.88 (post-HPKE `Cargo.lock`
+> requires it); (3) `LABEL tee.launch_policy.log_redirect=always` added — the
+> prod image otherwise gives the workload no usable stdout and the first
+> `println!` kills the container ("Workload completed" ~0.1s after launch,
+> no logs). Verifier updated for issue 003's `hpke:`/`tls:` key-binding
+> entries in `eat_nonce` (membership check; pytest 8/8). `terraform destroy`
+> of the infra root is pending human approval (permission gate); exact
+> command in `infra/README.md` step 7.
+
 > **Status note (2026-06-10):** Implemented in `launcher/`, `infra/`, `scripts/`.
 > All local checks pass (cargo fmt/clippy/test, terraform validate both roots,
 > verifier pytest 6/6). The live cloud run (apply → /echo → verify → destroy)

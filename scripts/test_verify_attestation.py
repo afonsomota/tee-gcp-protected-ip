@@ -79,6 +79,22 @@ def test_nonce_list_form_is_accepted(keypair):
     assert results_by_name(claims)["eat_nonce"]
 
 
+def test_nonce_with_key_binding_entries_is_accepted(keypair):
+    key, jwks = keypair
+    claims = va.verify_signature(
+        make_token(key, eat_nonce=[NONCE, "hpke:" + "c" * 64, "tls:" + "d" * 64]), jwks
+    )
+    assert results_by_name(claims)["eat_nonce"]
+
+
+def test_key_binding_entries_without_our_nonce_fail(keypair):
+    key, jwks = keypair
+    claims = va.verify_signature(
+        make_token(key, eat_nonce=["hpke:" + "c" * 64, "tls:" + "d" * 64]), jwks
+    )
+    assert not results_by_name(claims)["eat_nonce"]
+
+
 def test_wrong_issuer_and_audience_fail(keypair):
     key, jwks = keypair
     claims = va.verify_signature(make_token(key, iss="https://evil", aud="https://other"), jwks)

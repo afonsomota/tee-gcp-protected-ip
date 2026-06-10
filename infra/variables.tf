@@ -38,9 +38,9 @@ variable "machine_type" {
 }
 
 variable "confidential_space_image_family" {
-  description = "Confidential Space image family (use confidential-space-debian-dbg for the debug image)"
+  description = "Confidential Space image family (use confidential-space-debug for the SSH-able debug image)"
   type        = string
-  default     = "confidential-space-debian"
+  default     = "confidential-space"
 }
 
 variable "http_port" {
