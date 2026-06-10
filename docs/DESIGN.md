@@ -26,10 +26,10 @@ provably constrains: nothing leaves except the reply you see."*
 | Storage | **Local-first**: ciphertext in browser IndexedDB (export/import supported). The cloud stores no user data at rest — "we cannot leak what we do not have". KMS/GCS exist only to protect company IP and the ACME state. |
 | Data flow | **On-demand minimization.** Entries enter enclave memory only when the harness's search tool retrieves them (top-k), per session, never persisted server-side. |
 | Tools | Manifest in the open launcher declares each tool's execution locus. Enclave-side (model-bound): `embed`, `summarize`, `extract_metadata` (emotions, situations, life phases). Client-side (data-bound): `attach_metadata`, `search_entries` (metadata filters + vector similarity over locally stored embeddings). The harness's secret sauce is *when/why* to call tools, not the tools themselves. |
-| Build verification | **Kettle (lunal-dev/kettle) attested builds** as the primary path: the image is built inside a measured CVM; provenance (commit → digest) is committed into the hardware attestation report — trust chains to AMD at build time and runtime alike. Best-effort reproducibility + documented self-rebuild as the trustless fallback. Build CVM is ephemeral, in the same GCP project, via Terraform. |
+| Build verification | **Reproducible builds as the trust anchor**: the released image is produced by a fully pinned, deterministic recipe (pinned-container musl build → fixed-metadata layer tar → pinned crane → single-layer `scratch` image) that any verifier re-runs offline to re-derive the digest — zero trust in the operator or CI. Canonical build on GitHub Actions with an independent cross-rebuild job, release-blocking on digest mismatch; sigstore artifact attestations as the convenience tier. Residual limitation (documented in README): both builds run on GitHub infra, so CI compromise is detectable by third-party rebuilds, not prevented. See `docs/spikes/001-deterministic-oci-digest.md`. |
 | Frontend | React + Vite + TypeScript SPA (pnpm), deployed to **GitHub Pages** by Actions. hpke-js + jose for crypto. Verifies attestation and shows a badge with a "know more" link to the verify docs. Trust-on-first-use caveat documented; paranoid users run it locally. |
-| Release flow | Frontend: auto via Actions. Enclave: explicit `make release` (ephemeral kettle build CVM → attested image + provenance) and `make deploy` (pin digest into the CVM, update KMS attestation policy). |
-| Repo layout | Monorepo: `frontend/`, `launcher/`, `harness/` (simulated private repo with explanatory README), `infra/` (Terraform + kettle config), `docs/` (architecture, threat model, verify-it-yourself). |
+| Release flow | Frontend: auto via Actions. Enclave: release tag triggers the reproducible build workflow (build + independent re-derivation + push by digest + attestation), then explicit `make deploy` (pin digest into the CVM, update KMS attestation policy). |
+| Repo layout | Monorepo: `frontend/`, `launcher/`, `harness/` (simulated private repo with explanatory README), `infra/` (Terraform), `docs/` (architecture, threat model, verify-it-yourself). |
 
 ## Chat flow
 
@@ -64,9 +64,9 @@ falsely (platform trust); model-output IP leakage (distillation).
 
 ## Open spikes (verify before building)
 
-1. **Kettle ↔ OCI digest**: confirm kettle can build+push the container image
-   inside the TEE so the attested digest equals the Confidential Space
-   measured digest; otherwise add a deterministic binary→image wrap.
+1. **Deterministic OCI digest**: ✅ resolved — a fully pinned binary→image
+   recipe produces byte-identical manifest digests across runs; reproducible
+   builds are the trust anchor (`docs/spikes/001-deterministic-oci-digest.md`).
 2. **`eat_nonce` capacity**: confirm binding two key hashes (HPKE + TLS) in
    the Confidential Space token request (or bind a hash of a combined
    structure).

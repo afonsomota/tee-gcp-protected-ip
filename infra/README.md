@@ -56,6 +56,11 @@ gcloud iam workload-identity-pools providers create-oidc attestation-verifier \
 
 ## Build & push the workload image
 
+> **Dev/bootstrap only.** This `docker buildx` path is for the walking
+> skeleton and local iteration; its digests are not reproducible and will
+> not match a release. Production images come from the deterministic
+> release pipeline (issue 012).
+
 ```sh
 gcloud auth configure-docker europe-west4-docker.pkg.dev
 docker buildx build --platform linux/amd64 \

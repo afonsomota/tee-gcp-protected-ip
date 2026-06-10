@@ -1,3 +1,7 @@
+# DEV ONLY — NOT the release recipe. Images built here will NOT match the
+# released digest: production images are produced by the deterministic
+# recipe in issue 012 (pinned-container build + crane wrap), and only those
+# digests are admitted by the KMS attestation policy.
 # Multi-stage build: static musl binary -> scratch image.
 # Build with: docker buildx build --platform linux/amd64 -t <tag> launcher/
 FROM --platform=$BUILDPLATFORM rust:1.88-alpine AS build
