@@ -12,10 +12,18 @@ status: needs-review
 > `frontend/src/lib/config.ts` (`VITE_API_ENDPOINT`, `VITE_EXPECTED_IMAGE_DIGEST`,
 > one vitest test), and `frontend/README.md` (local-run, config values, TOFU
 > caveat, one-time Pages/DNS/variables setup). Validated locally: YAML parses,
-> tests pass, env-injected `pnpm build` passes. Deferred (no GitHub remote/repo
-> exists yet, so a live deploy is unverifiable): actual Pages deploy over HTTPS
-> on the custom domain, and the deployed app talking to the live enclave (badge
-> verifies / chat works — the badge and the "know more" page arrive in issue 009).
+> tests pass, env-injected `pnpm build` passes.
+>
+> **Live-deploy update (2026-06-10):** GitHub repo now exists
+> (`afonsomota/tee-gcp-protected-ip`). Pages enabled with the Actions build
+> source (HTTPS enforced); workflow run 27308067395 passed end-to-end
+> (install → test → build → deploy) and the SPA is live at
+> <https://afonsomota.github.io/tee-gcp-protected-ip/> (HTTP/2 200, assets
+> path-relative). Still deferred: custom domain (needs `FRONTEND_DOMAIN` repo
+> variable + a DNS CNAME — no domain chosen yet), and `VITE_API_ENDPOINT` /
+> `VITE_EXPECTED_IMAGE_DIGEST` repo variables plus the deployed-app-talks-to-
+> live-enclave check (enclave currently destroyed; badge/"know more" page
+> arrive with issue 009).
 
 ## What to build
 
