@@ -1,7 +1,7 @@
 # DEV ONLY — NOT the release recipe. Images built here will NOT match the
 # released digest: production images are produced by the deterministic
 # recipe in issue 012 (pinned-container build + crane wrap), and only those
-# digests are admitted by the KMS attestation policy.
+# digests are what verifiers pin.
 # Multi-stage build: static musl binary -> scratch image.
 # Build with: docker buildx build --platform linux/amd64 -t <tag> launcher/
 FROM --platform=$BUILDPLATFORM rust:1.88-alpine AS build
@@ -23,10 +23,10 @@ COPY --from=build /src/target/x86_64-unknown-linux-musl/release/launcher /launch
 # is unavailable and the first println! kills the workload).
 LABEL "tee.launch_policy.log_redirect"="always"
 # Env vars the operator may set via tee-env-* VM metadata (issue 004 TLS).
-# Deliberately narrow: only the ACME/TLS wiring is overridable, and none of
-# it can weaken the user-privacy story — TLS is defense-in-depth, the trust
-# rides on HPKE + attestation, and the digest in the KMS IAM binding pins
-# which image can unwrap the sealed cert state.
-LABEL "tee.launch_policy.allow_env_override"="TLS_DOMAIN,ACME_CONTACT,ACME_DIRECTORY,ACME_STATE_BUCKET,ACME_KMS_KEY,ACME_WIP_AUDIENCE,HTTPS_PORT"
+# Deliberately narrow: only the ACME/TLS wiring is overridable, none of it
+# can weaken the user-privacy story (TLS is defense-in-depth; the trust
+# rides on HPKE + attestation), and none of it points at state — the ACME
+# account and cert are fresh per boot and live only in enclave memory.
+LABEL "tee.launch_policy.allow_env_override"="TLS_DOMAIN,ACME_CONTACT,ACME_DIRECTORY"
 EXPOSE 8080 443
 ENTRYPOINT ["/launcher"]

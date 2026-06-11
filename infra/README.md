@@ -8,7 +8,7 @@ Two Terraform roots:
 
 | Root | Purpose | Lifecycle |
 |---|---|---|
-| `infra/bootstrap/` | Required APIs + Artifact Registry repo + static external IP + TLS/ACME long-lived state (bucket, KMS key, workload identity pool) | Apply **once** per project, never destroy |
+| `infra/bootstrap/` | Required APIs + Artifact Registry repo + static external IP | Apply **once** per project, never destroy |
 | `infra/` | Service account, firewall, the CVM itself | Apply/destroy per deployment |
 
 The static IP lives in bootstrap so the CVM comes back on the **same address**
@@ -42,9 +42,8 @@ gcloud artifacts repositories create tee-example --repository-format=docker --lo
 gcloud compute addresses create tee-example-cvm --region=europe-west4
 ```
 
-Already bootstrapped before the static IP (or the issue-004 TLS/ACME
-resources) existed? Re-run the bootstrap apply — it only adds the new
-resources; existing ones are untouched.
+Already bootstrapped before the static IP existed? Re-run the bootstrap
+apply — it only adds the new resources; existing ones are untouched.
 
 ### DNS for the enclave API
 
@@ -62,15 +61,6 @@ set once and stays valid across redeployments.
 The frontend's custom domain is a separate concern: it's a CNAME to
 `<user>.github.io` configured through GitHub Pages (issue #13), not anything
 in `infra/`.
-
-### Workload identity pool
-
-The bootstrap root now creates a workload identity pool + provider
-(`tee-example-pool` / `attestation-verifier`) that turns a Confidential Space
-attestation token into an IAM principal, mapping the workload image digest to
-`attribute.image_digest`. Issue 004 uses it to gate the ACME-state KMS key on
-attestation; issue 007 (weights/harness key release) will reuse the same pool
-with per-digest IAM bindings.
 
 ## Build & push the workload image
 
@@ -132,10 +122,11 @@ container logs (`tee-container-log-redirect=true` is set).
 
 With `-var tls_domain=api.YOUR_DOMAIN` the launcher serves HTTPS directly:
 rustls-acme obtains a Let's Encrypt certificate over TLS-ALPN-01 (port 443
-only, no port 80, no LB) and persists the ACME account + cert as KMS-wrapped
-blobs in GCS, so `terraform destroy`/`apply` of this root reuses the same
-certificate instead of re-issuing. The long-lived pieces (static IP, bucket,
-KMS key, workload identity pool) live in `infra/bootstrap/`.
+only, no port 80, no LB). Nothing persists: every boot registers a fresh
+ACME account and orders a fresh certificate, both living only in enclave
+memory (`launcher/src/acme_cache.rs` has the rationale). Only the static IP
+is long-lived (in `infra/bootstrap/`), so DNS stays valid across
+destroy/apply cycles.
 
 One-time DNS setup, after applying the bootstrap root:
 
@@ -161,31 +152,19 @@ curl -v "https://api.YOUR_DOMAIN/echo?msg=hello"   # staging cert: add --insecur
 
 Notes:
 
-- **Staging first.** The default ACME directory is Let's Encrypt staging
-  (untrusted test certs, generous rate limits). Only set
-  `-var acme_directory=letsencrypt` once issuance works, because production
-  issuance is rate-limited per domain (the sealed cache makes this a
-  non-issue for restarts, but not for repeated state wipes).
-- **KMS is gated on attestation.** Decrypt/encrypt on the sealing key is
-  granted only to
-  `principalSet://...workloadIdentityPools/tee-example-pool/attribute.image_digest/<digest>`;
-  the VM service account has no KMS role. Demonstrate that a non-attested
-  principal cannot unwrap the state:
-
-  ```sh
-  OBJ=$(gcloud storage ls gs://YOUR_PROJECT_ID-tee-example-acme-state | head -1)
-  gcloud storage cp "$OBJ" sealed.bin
-  gcloud kms decrypt --ciphertext-file=sealed.bin --plaintext-file=- \
-    --key acme-state-sealing --keyring tee-example --location europe-west4
-  # expected: PERMISSION_DENIED — even the project operator cannot unwrap
-  ```
-
+- **Staging first.** The default ACME directory is Let's Encrypt staging:
+  certs chain to untrusted test roots (`curl --insecure` to inspect), but
+  issuance is effectively unlimited (30,000 certs/week per domain), so
+  destroy/apply cycles cost nothing. Only set
+  `-var acme_directory=letsencrypt` for a live demo with a browser-trusted
+  cert. Production limits that matter here, since every boot is a fresh
+  issuance: **5 certs per exact identifier set per 7 days** (refills 1 per
+  ~34 h) and 50 per registered domain per 7 days — fine for occasional
+  demos, not for tight redeploy loops. New-account registration (also fresh
+  per boot) allows 10 per IP per 3 hours.
 - **Cert/key binding.** The attestation token's `tls:` eat_nonce is the
   SHA-256 of the serving certificate key's SubjectPublicKeyInfo DER; compare
   with `openssl s_client -connect api.YOUR_DOMAIN:443 | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | sha256sum`.
-- A new image digest changes the KMS principalSet member: the old enclave's
-  state stays sealed and only the newly pinned digest can unwrap it (the IAM
-  binding in this root tracks `var.image_digest`).
 
 ## Live run
 

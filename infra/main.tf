@@ -30,25 +30,14 @@ locals {
 
   tls_enabled = var.tls_domain != ""
 
-  # Long-lived TLS/ACME resources created by infra/bootstrap (issue 004).
-  # Names must match the bootstrap root.
-  acme_state_bucket = "${var.project_id}-tee-example-acme-state"
-  acme_kms_key      = "projects/${var.project_id}/locations/${var.region}/keyRings/tee-example/cryptoKeys/acme-state-sealing"
-  wip_provider      = "projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/tee-example-pool/providers/attestation-verifier"
-
   # Confidential Space forwards tee-env-* metadata as container env vars
   # (admitted by the image's tee.launch_policy.allow_env_override label).
   tls_env = local.tls_enabled ? {
-    tee-env-TLS_DOMAIN        = var.tls_domain
-    tee-env-ACME_CONTACT      = var.acme_contact
-    tee-env-ACME_DIRECTORY    = var.acme_directory
-    tee-env-ACME_STATE_BUCKET = local.acme_state_bucket
-    tee-env-ACME_KMS_KEY      = local.acme_kms_key
-    tee-env-ACME_WIP_AUDIENCE = "//iam.googleapis.com/${local.wip_provider}"
+    tee-env-TLS_DOMAIN     = var.tls_domain
+    tee-env-ACME_CONTACT   = var.acme_contact
+    tee-env-ACME_DIRECTORY = var.acme_directory
   } : {}
 }
-
-data "google_project" "current" {}
 
 # Static external IP reserved by infra/bootstrap. Looked up by name rather
 # than via remote state so this root has no dependency on bootstrap's state —
@@ -96,27 +85,6 @@ resource "time_sleep" "iam_propagation" {
     google_project_iam_member.ar_reader,
   ]
   create_duration = "120s"
-}
-
-# The launcher reads/writes the *sealed* ACME blobs as the VM service
-# account; the plaintext is protected by the KMS binding below, not by GCS.
-resource "google_storage_bucket_iam_member" "acme_state_rw" {
-  count  = local.tls_enabled ? 1 : 0
-  bucket = local.acme_state_bucket
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.workload.email}"
-}
-
-# The acceptance gate of issue 004: only the attested workload — a
-# Confidential Space instance whose token carries *this* image digest —
-# can wrap/unwrap the ACME state. The VM service account itself gets no
-# KMS access, so a non-attested principal (operator included) cannot
-# unwrap the sealed blobs.
-resource "google_kms_crypto_key_iam_member" "acme_state_attested" {
-  count         = local.tls_enabled ? 1 : 0
-  crypto_key_id = local.acme_kms_key
-  role          = "roles/cloudkms.cryptoKeyEncrypterDecrypter"
-  member        = "principalSet://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/tee-example-pool/attribute.image_digest/${var.image_digest}"
 }
 
 resource "google_compute_firewall" "allow_http" {

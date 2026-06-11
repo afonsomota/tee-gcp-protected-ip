@@ -65,10 +65,13 @@ gains an attacker nothing beyond what plain HTTP would: every payload is
 HPKE-sealed to the attestation-verified enclave key, so user privacy does not
 rest on the WebPKI. TLS exists for ordinary web hygiene (browser padlock,
 mixed-content rules, casual snooping) and to protect *metadata* in transit.
-The sealed ACME state (account key + cert) is KMS-wrapped in GCS and
-unwrappable only by attested workloads of the pinned image digest; its
-compromise would therefore also only degrade defense-in-depth, never the
-HPKE channel.
+ACME state (account key + cert) is deliberately not persisted: each boot
+issues fresh. Sealing it for reuse (KMS-wrapped blobs in GCS, unwrap gated
+on attestation) was built and then removed — it added GCS/KMS/STS client
+code to the audited TCB to defend a property GCP cannot deliver against
+this threat model's adversary: the KMS key lives in the operator's project,
+and a project owner can always re-grant themselves decrypt. Because TLS is
+defense-in-depth, fresh issuance per boot loses nothing that matters.
 
 **Explicitly out of scope / documented caveats:** side-channel attacks;
 compromised user device/browser extensions; frontend TOFU (mitigated by
@@ -85,11 +88,13 @@ falsely (platform trust); model-output IP leakage (distillation).
    structure).
 3. **Memory fit**: Gemma 4 E2B (Q4) + EmbeddingGemma + launcher on
    `n2d-standard-4` (16 GB); bump to `-8` if tight.
-4. **ACME at boot**: implemented in issue 004 (`launcher/src/tls.rs`): the
-   sealed cert state is unwrapped via `load_cert` before rustls-acme deploys
-   any certificate, and until one is deployed TLS handshakes simply fail —
-   no plaintext window. Restarts reuse the cached cert, so Let's Encrypt
-   rate limits only apply to genuinely new issuance. Live verification
+4. **ACME at boot**: implemented in issue 004 (`launcher/src/tls.rs`):
+   every boot orders a fresh certificate, and until one is deployed TLS
+   handshakes simply fail — no plaintext window. The restart story is rate
+   limits, not state: staging (the default directory) allows 30,000
+   certs/week per domain; production allows 5 per exact identifier set per
+   7 days, enough for occasional live demos
+   (`launcher/src/acme_cache.rs` has the arithmetic). Live verification
    against a real domain still pending.
 5. **hpke-js / WebCrypto** interop with the Rust `hpke` crate (suite choice:
    X25519-HKDF-SHA256 / ChaCha20-Poly1305).

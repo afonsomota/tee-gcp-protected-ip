@@ -5,8 +5,8 @@
 //!   * a placeholder TLS keypair, hashed so the binding format is fixed even
 //!     before a certificate exists. When TLS serving is enabled (`tls.rs`),
 //!     the binding is replaced with the SPKI of the ACME-issued certificate's
-//!     key as soon as it is loaded from the sealed cache or freshly ordered,
-//!     so attestation tokens always hash the key actually serving TLS.
+//!     key as soon as one is ordered, so attestation tokens always hash the
+//!     key actually serving TLS.
 //!
 //! # Binding encoding (resolves DESIGN.md open spike #2)
 //!
@@ -84,8 +84,8 @@ impl EnclaveKeys {
     }
 
     /// Rebind `tls:` to a new key, identified by its SubjectPublicKeyInfo
-    /// DER. Called by the sealed ACME cache whenever a certificate is loaded
-    /// or stored, so tokens minted afterwards hash the serving cert's key.
+    /// DER. Called by the ACME cache whenever a certificate is loaded or
+    /// stored, so tokens minted afterwards hash the serving cert's key.
     pub fn set_tls_spki(&self, spki_der: Vec<u8>) {
         *self.tls_spki_der.write().expect("tls spki lock") = spki_der;
     }

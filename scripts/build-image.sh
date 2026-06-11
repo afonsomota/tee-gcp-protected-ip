@@ -30,8 +30,9 @@ cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
 DIST="$REPO_ROOT/dist"
 
-# ---- pinned inputs (recipe version 1) --------------------------------------
-RECIPE_VERSION=1
+# ---- pinned inputs (recipe version 2) --------------------------------------
+# v2: add the tee.launch_policy.allow_env_override label (issue 004 TLS).
+RECIPE_VERSION=2
 # rust:1.88.0-alpine3.22, linux/amd64 platform image (not the multi-arch index)
 RUST_IMAGE="rust@sha256:64eba3726734dcfe89e0a62a0485007a3ab7c7372ce5b38c621d8812f70215f0"
 RUST_IMAGE_HUMAN="rust:1.88.0-alpine3.22 (linux/amd64)"
@@ -118,13 +119,16 @@ REG="$(docker port "$REG_ID" 5000/tcp | head -n1 | sed 's/^.*:/localhost:/')"
 for _ in $(seq 1 50); do curl -fsS "http://$REG/v2/" >/dev/null 2>&1 && break; sleep 0.2; done
 
 "$CRANE" append --oci-empty-base -f "$DIST/layer.tar" -t "$REG/launcher:rc" >/dev/null
-# Keep the Confidential Space launch-policy label: without
-# tee.launch_policy.log_redirect=always the production image gives the
-# container no stdout and the VM self-terminates right after launch.
+# Keep the Confidential Space launch-policy labels (must mirror
+# launcher/Dockerfile): without tee.launch_policy.log_redirect=always the
+# production image gives the container no stdout and the VM self-terminates
+# right after launch; without allow_env_override the tee-env-* metadata set
+# by infra/main.tf for TLS (issue 004) is rejected and TLS deploys fail.
 "$CRANE" mutate "$REG/launcher:rc" \
   --set-platform linux/amd64 \
   --entrypoint /launcher \
   --label tee.launch_policy.log_redirect=always \
+  --label tee.launch_policy.allow_env_override=TLS_DOMAIN,ACME_CONTACT,ACME_DIRECTORY \
   -t "$REG/launcher:release" >/dev/null
 DIGEST="$("$CRANE" digest "$REG/launcher:release")"
 

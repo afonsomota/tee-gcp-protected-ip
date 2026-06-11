@@ -3,9 +3,9 @@
 //! When `TLS_DOMAIN` is set the launcher serves HTTPS directly: rustls-acme
 //! obtains and renews a Let's Encrypt certificate via the TLS-ALPN-01
 //! challenge (no port 80, no proxy, no load balancer — the TLS private key
-//! never exists outside enclave memory). Account and certificate state
-//! persist across boots as KMS-wrapped blobs in GCS (`sealed_cache.rs` +
-//! `gcp.rs`), so VM recreation reuses the same cert instead of re-issuing.
+//! never exists outside enclave memory). Nothing persists across boots:
+//! every boot registers a fresh ACME account and orders a fresh certificate
+//! (`acme_cache.rs` has the rationale and the rate-limit arithmetic).
 //!
 //! Outbound TLS to the ACME directory uses compiled-in `webpki-roots`
 //! (rustls-acme is built with its `webpki-roots` feature): the runtime image
@@ -17,15 +17,12 @@
 //!
 //! # Configuration (environment)
 //!
-//! | Variable            | Meaning                                              |
-//! |---------------------|------------------------------------------------------|
-//! | `TLS_DOMAIN`        | Domain to serve/order a cert for; unset = plain HTTP |
-//! | `ACME_CONTACT`      | Contact email for the ACME account (required)        |
-//! | `ACME_STATE_BUCKET` | GCS bucket for the sealed state (required)           |
-//! | `ACME_KMS_KEY`      | Full KMS key resource wrapping the state (required)  |
-//! | `ACME_DIRECTORY`    | `letsencrypt`, `letsencrypt-staging` (default), or a directory URL |
-//! | `ACME_WIP_AUDIENCE` | Workload-identity-pool provider audience for attested KMS access (optional; metadata SA token if unset) |
-//! | `HTTPS_PORT`        | Listen port, default 443                             |
+//! | Variable         | Meaning                                              |
+//! |------------------|------------------------------------------------------|
+//! | `TLS_DOMAIN`     | Domain to serve/order a cert for; unset = plain HTTP |
+//! | `ACME_CONTACT`   | Contact email for the ACME account (required)        |
+//! | `ACME_DIRECTORY` | `letsencrypt`, `letsencrypt-staging` (default), or a directory URL |
+//! | `HTTPS_PORT`     | Listen port, default 443 (TLS-ALPN-01 validates on 443 only; non-default is for local testing) |
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -33,8 +30,8 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use rustls_acme::AcmeConfig;
 
-use crate::sealed_cache::SealedCache;
-use crate::{gcp, AppState};
+use crate::acme_cache::InMemoryCache;
+use crate::AppState;
 
 pub const LETS_ENCRYPT_PRODUCTION: &str = "https://acme-v02.api.letsencrypt.org/directory";
 pub const LETS_ENCRYPT_STAGING: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
@@ -43,10 +40,7 @@ pub const LETS_ENCRYPT_STAGING: &str = "https://acme-staging-v02.api.letsencrypt
 pub struct TlsConfig {
     pub domain: String,
     pub contact: String,
-    pub bucket: String,
-    pub kms_key: String,
     pub directory_url: String,
-    pub wip_audience: Option<String>,
     pub https_port: u16,
 }
 
@@ -85,10 +79,7 @@ impl TlsConfig {
         Ok(Some(Self {
             domain,
             contact: require("ACME_CONTACT")?,
-            bucket: require("ACME_STATE_BUCKET")?,
-            kms_key: require("ACME_KMS_KEY")?,
             directory_url,
-            wip_audience: nonempty("ACME_WIP_AUDIENCE"),
             https_port,
         }))
     }
@@ -97,11 +88,7 @@ impl TlsConfig {
 /// Serve the app over HTTPS, never returning. TLS-ALPN-01 challenge
 /// handshakes are answered on the same port by the acceptor.
 pub async fn serve(state: AppState, config: TlsConfig) {
-    let cache = SealedCache::new(
-        gcp::GcsBlobStore::new(config.bucket.clone()),
-        gcp::KmsSealer::new(config.kms_key.clone(), config.wip_audience.clone()),
-        Arc::clone(&state.keys),
-    );
+    let cache = InMemoryCache::new(Arc::clone(&state.keys));
     let mut acme = AcmeConfig::new([config.domain.clone()])
         .contact_push(format!("mailto:{}", config.contact))
         .directory(&config.directory_url)
@@ -148,11 +135,6 @@ mod tests {
     const FULL: &[(&str, &str)] = &[
         ("TLS_DOMAIN", "api.example.com"),
         ("ACME_CONTACT", "ops@example.com"),
-        ("ACME_STATE_BUCKET", "proj-acme-state"),
-        (
-            "ACME_KMS_KEY",
-            "projects/p/locations/l/keyRings/r/cryptoKeys/k",
-        ),
     ];
 
     #[test]
@@ -171,28 +153,15 @@ mod tests {
         let config = TlsConfig::from_lookup(lookup(FULL)).unwrap().unwrap();
         assert_eq!(config.domain, "api.example.com");
         assert_eq!(config.contact, "ops@example.com");
-        assert_eq!(config.bucket, "proj-acme-state");
-        assert_eq!(
-            config.kms_key,
-            "projects/p/locations/l/keyRings/r/cryptoKeys/k"
-        );
         // Defaults: staging directory (rate-limit safety) and port 443.
         assert_eq!(config.directory_url, LETS_ENCRYPT_STAGING);
         assert_eq!(config.https_port, 443);
-        assert_eq!(config.wip_audience, None);
     }
 
     #[test]
-    fn missing_required_var_is_a_boot_error() {
-        for missing in ["ACME_CONTACT", "ACME_STATE_BUCKET", "ACME_KMS_KEY"] {
-            let pairs: Vec<(&str, &str)> = FULL
-                .iter()
-                .copied()
-                .filter(|(k, _)| *k != missing)
-                .collect();
-            let err = TlsConfig::from_lookup(lookup(&pairs)).unwrap_err();
-            assert!(err.contains(missing), "{err}");
-        }
+    fn missing_contact_is_a_boot_error() {
+        let err = TlsConfig::from_lookup(lookup(&[("TLS_DOMAIN", "api.example.com")])).unwrap_err();
+        assert!(err.contains("ACME_CONTACT"), "{err}");
     }
 
     #[test]
@@ -228,18 +197,10 @@ mod tests {
     }
 
     #[test]
-    fn wip_audience_and_port_are_honored() {
+    fn https_port_is_honored() {
         let mut pairs = FULL.to_vec();
-        pairs.push((
-            "ACME_WIP_AUDIENCE",
-            "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/v",
-        ));
         pairs.push(("HTTPS_PORT", "8443"));
         let config = TlsConfig::from_lookup(lookup(&pairs)).unwrap().unwrap();
-        assert_eq!(
-            config.wip_audience.as_deref(),
-            Some("//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/v")
-        );
         assert_eq!(config.https_port, 8443);
 
         let mut bad = FULL.to_vec();

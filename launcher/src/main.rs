@@ -2,10 +2,9 @@
 //! attestation-token endpoint. This is the seed of the audited TCB described
 //! in docs/DESIGN.md.
 
-mod gcp;
+mod acme_cache;
 mod hpke_channel;
 mod keys;
-mod sealed_cache;
 mod tls;
 
 use std::sync::Arc;
