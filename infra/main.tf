@@ -24,7 +24,9 @@ provider "google" {
 locals {
   # Full image reference pinned by digest — this digest is what the
   # attestation token's submods.container.image_digest claim must equal.
-  image_reference = "${var.region}-docker.pkg.dev/${var.project_id}/${var.repository_id}/launcher@${var.image_digest}"
+  # image_digest is null on destroy-only runs; the placeholder is never
+  # evaluated because the VM resource is being deleted, not created/updated.
+  image_reference = var.image_digest != null ? "${var.region}-docker.pkg.dev/${var.project_id}/${var.repository_id}/launcher@${var.image_digest}" : "destroy-only-no-image"
 
   tls_enabled = var.tls_domain != ""
 

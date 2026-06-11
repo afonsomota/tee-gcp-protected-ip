@@ -16,11 +16,12 @@ variable "zone" {
 }
 
 variable "image_digest" {
-  description = "Digest of the pushed launcher image (sha256:...)"
+  description = "Digest of the pushed launcher image (sha256:...). Optional: omit on destroy-only runs (not evaluated when the VM is being deleted)."
   type        = string
+  default     = null
 
   validation {
-    condition     = can(regex("^sha256:[0-9a-f]{64}$", var.image_digest))
+    condition     = var.image_digest == null || can(regex("^sha256:[0-9a-f]{64}$", var.image_digest))
     error_message = "image_digest must look like sha256:<64 hex chars>."
   }
 }
