@@ -33,6 +33,9 @@ resource "google_project_service" "apis" {
     "compute.googleapis.com",
     "confidentialcomputing.googleapis.com",
     "artifactregistry.googleapis.com",
+    # Mints workload-identity-federation access tokens; without it the
+    # release workflow's registry push fails at the GCP auth step.
+    "iamcredentials.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false
