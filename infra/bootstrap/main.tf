@@ -38,6 +38,9 @@ resource "google_project_service" "apis" {
     "artifactregistry.googleapis.com",
     "cloudkms.googleapis.com",
     "iam.googleapis.com",
+    # Mints workload-identity-federation access tokens; without it the
+    # release workflow's registry push fails at the GCP auth step.
+    "iamcredentials.googleapis.com",
     "storage.googleapis.com",
     "sts.googleapis.com",
   ])

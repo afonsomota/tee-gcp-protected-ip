@@ -77,7 +77,10 @@ with per-digest IAM bindings.
 > **Dev/bootstrap only.** This `docker buildx` path is for the walking
 > skeleton and local iteration; its digests are not reproducible and will
 > not match a release. Production images come from the deterministic
-> release pipeline (issue 012).
+> release pipeline: `make image` (reproducible build, prints digest D),
+> `make push PROJECT_ID=...` (push by digest), `make deploy PROJECT_ID=...`
+> (pin D into the CVM and apply) — see the root `README.md` and
+> `.github/workflows/release.yml`.
 
 ```sh
 gcloud auth configure-docker europe-west4-docker.pkg.dev
