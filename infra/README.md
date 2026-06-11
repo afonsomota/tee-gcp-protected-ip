@@ -103,9 +103,13 @@ docker buildx imagetools inspect \
 
 ```sh
 terraform -chdir=infra init
-terraform -chdir=infra apply \
-  -var project_id=YOUR_PROJECT_ID \
-  -var image_digest=sha256:DIGEST_FROM_ABOVE
+# Persist the deployment vars in a tfvars file (gitignored). Terraform
+# auto-loads it, so the destroy at the end needs no vars re-supplied.
+cat > infra/terraform.tfvars <<EOF
+project_id   = "YOUR_PROJECT_ID"
+image_digest = "sha256:DIGEST_FROM_ABOVE"
+EOF
+terraform -chdir=infra apply
 
 IP=$(terraform -chdir=infra output -raw external_ip)
 # Boot takes a couple of minutes (image pull + container start).
@@ -114,9 +118,11 @@ curl "http://$IP:8080/echo?msg=hello"
 curl "http://api.YOUR_DOMAIN:8080/echo?msg=hello"
 ./scripts/verify-attestation.py --url "http://$IP:8080" --image-digest sha256:DIGEST_FROM_ABOVE
 
-terraform -chdir=infra destroy \
-  -var project_id=YOUR_PROJECT_ID \
-  -var image_digest=sha256:DIGEST_FROM_ABOVE
+terraform -chdir=infra destroy   # vars come from infra/terraform.tfvars
+
+# If destroying a CI-deployed service locally (no tfvars file on disk),
+# only project_id is needed — image_digest is not evaluated during destroy.
+terraform -chdir=infra destroy -var="project_id=YOUR_PROJECT_ID"
 ```
 
 The verifier generates a fresh random nonce, fetches the token from
@@ -175,9 +181,14 @@ DIGEST=$(docker buildx imagetools inspect \
   europe-west4-docker.pkg.dev/YOUR_PROJECT_ID/tee-example/launcher:latest \
   --format '{{json .Manifest.Digest}}' | tr -d '"')
 
-# 4. Bring up the Confidential Space CVM
+# 4. Bring up the Confidential Space CVM. The vars are persisted in a
+#    gitignored tfvars file so step 7's destroy needs none of them.
 terraform -chdir=infra init
-terraform -chdir=infra apply -var project_id=YOUR_PROJECT_ID -var image_digest=$DIGEST
+cat > infra/terraform.tfvars <<EOF
+project_id   = "YOUR_PROJECT_ID"
+image_digest = "$DIGEST"
+EOF
+terraform -chdir=infra apply
 
 # 5. Exercise the workload (allow a couple of minutes for boot + image pull)
 IP=$(terraform -chdir=infra output -raw external_ip)
@@ -187,5 +198,8 @@ curl "http://$IP:8080/echo?msg=hello"
 ./scripts/verify-attestation.py --url "http://$IP:8080" --image-digest "$DIGEST"
 
 # 7. Tear everything down
-terraform -chdir=infra destroy -var project_id=YOUR_PROJECT_ID -var image_digest=$DIGEST
+# Same-env run (vars already in infra/terraform.tfvars):
+terraform -chdir=infra destroy
+# CI-deployed service, destroying locally (no tfvars on disk):
+terraform -chdir=infra destroy -var="project_id=YOUR_PROJECT_ID"
 ```
