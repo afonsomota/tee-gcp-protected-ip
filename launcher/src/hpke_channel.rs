@@ -162,6 +162,7 @@ mod tests {
         AppState {
             keys: Arc::new(EnclaveKeys::generate()),
             dev: false,
+            inference: None,
         }
     }
 

@@ -93,7 +93,11 @@ gcloud iam workload-identity-pools providers create-oidc attestation-verifier \
 
 ```sh
 gcloud auth configure-docker europe-west4-docker.pkg.dev
+# MODEL_URL bakes chat-model weights (GGUF) into the image so /chat serves
+# real inference (issue 006; encrypted delivery replaces this in issue 007).
+# Without it the image still works, but /chat returns 503.
 docker buildx build --platform linux/amd64 \
+  --build-arg MODEL_URL="https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf" \
   -t europe-west4-docker.pkg.dev/YOUR_PROJECT_ID/tee-example/launcher:latest \
   --push launcher/
 # Grab the digest the CVM will be measured against:
@@ -115,7 +119,8 @@ EOF
 terraform -chdir=infra apply
 
 IP=$(terraform -chdir=infra output -raw external_ip)
-# Boot takes a couple of minutes (image pull + container start).
+# Boot takes several minutes (image pull — ~3.4 GB with baked weights — then
+# model load; the launcher logs "llama-server ready in Ns" when /chat works).
 curl "http://$IP:8080/echo?msg=hello"
 # …or, once the A record is in place:
 curl "http://api.YOUR_DOMAIN:8080/echo?msg=hello"
