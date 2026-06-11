@@ -119,6 +119,10 @@ curl "http://api.YOUR_DOMAIN:8080/echo?msg=hello"
 ./scripts/verify-attestation.py --url "http://$IP:8080" --image-digest sha256:DIGEST_FROM_ABOVE
 
 terraform -chdir=infra destroy   # vars come from infra/terraform.tfvars
+
+# If destroying a CI-deployed service locally (no tfvars file on disk),
+# only project_id is needed — image_digest is not evaluated during destroy.
+terraform -chdir=infra destroy -var="project_id=YOUR_PROJECT_ID"
 ```
 
 The verifier generates a fresh random nonce, fetches the token from
@@ -193,6 +197,9 @@ curl "http://$IP:8080/echo?msg=hello"
 # 6. Verify the attestation token end to end (expects RESULT: PASS)
 ./scripts/verify-attestation.py --url "http://$IP:8080" --image-digest "$DIGEST"
 
-# 7. Tear everything down (vars come from infra/terraform.tfvars)
+# 7. Tear everything down
+# Same-env run (vars already in infra/terraform.tfvars):
 terraform -chdir=infra destroy
+# CI-deployed service, destroying locally (no tfvars on disk):
+terraform -chdir=infra destroy -var="project_id=YOUR_PROJECT_ID"
 ```
