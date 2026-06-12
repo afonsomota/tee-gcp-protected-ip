@@ -153,6 +153,15 @@ resource "time_sleep" "iam_propagation" {
     google_storage_bucket_iam_member.artifacts_reader,
     google_kms_crypto_key_iam_member.weights_decrypter,
   ]
+
+  # Re-run the wait when the per-digest decrypt grant changes: a digest
+  # rotation replaces the KMS IAM member while this resource would otherwise
+  # already exist, and KMS IAM propagation takes minutes too. (The launcher
+  # also retries delivery for ~5 minutes, covering the slow tail.)
+  triggers = {
+    weights_decrypter_digest = local.weights_enabled && var.image_digest != null ? var.image_digest : ""
+  }
+
   create_duration = "120s"
 }
 

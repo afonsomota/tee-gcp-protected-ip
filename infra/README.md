@@ -215,6 +215,19 @@ The CVM must run the **production** `confidential-space` family: the
 provider's STABLE condition denies the debug image by design (don't "fix"
 this by loosening the condition).
 
+Two operational gotchas:
+
+- The image must carry `tee.launch_policy.allow_mount_destinations=/models`
+  (current `launcher/Dockerfile` and release recipe v3+). Setting
+  `weights_object` against an image built before that label makes
+  Confidential Space refuse the tmpfs mount and the VM self-terminates right
+  after launch, with no log mentioning the mount.
+- The launcher reads the weights metadata at boot and the tmpfs is created
+  at workload launch, so enabling or changing `weights_object` on an
+  **already-running** CVM does nothing — Terraform updates instance metadata
+  in place. Replace the VM:
+  `terraform -chdir=infra apply -replace=google_compute_instance.cvm`.
+
 ### Negative test: same service account, no attestation
 
 `scripts/test-kms-denial.sh` proves the gate is the attestation, not the

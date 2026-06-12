@@ -54,8 +54,18 @@ const MAX_CHUNK_SIZE: usize = 64 * 1024 * 1024;
 /// Where the decrypted model lands: the Confidential Space `tee-mount` tmpfs.
 const DEFAULT_DEST: &str = "/models/model.gguf";
 
-const FETCH_ATTEMPTS: u32 = 3;
-const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
+/// Delivery retry budget. KMS IAM propagation can run several minutes past
+/// infra's 120s `time_sleep` — especially after a digest rotation, where the
+/// per-digest decrypt grant is replaced while the VM merely restarts — so
+/// the budget must comfortably cover that, not just transient network blips.
+const FETCH_ATTEMPTS: u32 = 10;
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Config-resolution retry budget. Resolution blocks server startup (the
+/// caller needs to know whether an inference upstream exists), so this stays
+/// short; each probe is bounded by gcp.rs's per-request timeout.
+const RESOLVE_ATTEMPTS: u32 = 3;
+const RESOLVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
 struct Config {
     bucket: String,
@@ -69,37 +79,46 @@ struct Config {
 impl Config {
     /// Resolve weights configuration: `WEIGHTS_*` env vars first (dev/test
     /// override; not operator-settable in production, see module docs), then
-    /// GCE instance metadata attributes. `None` = weights delivery not
-    /// configured.
-    async fn resolve(dev: bool) -> Option<Config> {
+    /// GCE instance metadata attributes. `Ok(None)` = weights delivery not
+    /// configured; partial configuration and metadata-server failures are
+    /// errors, never a silent fallback — a deployment that configured
+    /// delivery must not quietly boot without it.
+    async fn resolve(dev: bool) -> Result<Option<Config>, String> {
         let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         if let Some(object) = env("WEIGHTS_OBJECT") {
-            return Some(Config {
-                bucket: env("WEIGHTS_BUCKET")?,
+            let require = |name: &str| {
+                env(name).ok_or_else(|| format!("WEIGHTS_OBJECT is set but {name} is not"))
+            };
+            return Ok(Some(Config {
+                bucket: require("WEIGHTS_BUCKET")?,
                 object,
-                kms_key: env("WEIGHTS_KMS_KEY")?,
+                kms_key: require("WEIGHTS_KMS_KEY")?,
+                // No audience = plain service-account KMS auth: acceptable
+                // only here, in the env-driven dev/test path.
                 wip_audience: env("WEIGHTS_WIP_AUDIENCE"),
-            });
+            }));
         }
         if dev {
             // Dev machines have no metadata server; don't probe for one.
-            return None;
+            return Ok(None);
         }
-        let attr = |name: &'static str| async move {
-            crate::gcp::instance_attribute(name)
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("weights: metadata attribute {name} unavailable: {e}");
-                    None
-                })
+        let Some(object) = crate::gcp::instance_attribute("weights-object").await? else {
+            return Ok(None);
         };
-        let object = attr("weights-object").await?;
-        Some(Config {
-            bucket: attr("weights-bucket").await?,
+        let require = |name: &'static str| async move {
+            crate::gcp::instance_attribute(name).await?.ok_or_else(|| {
+                format!("weights-object is set but metadata attribute {name} is missing")
+            })
+        };
+        Ok(Some(Config {
+            bucket: require("weights-bucket").await?,
             object,
-            kms_key: attr("weights-kms-key").await?,
-            wip_audience: attr("weights-wip-audience").await,
-        })
+            kms_key: require("weights-kms-key").await?,
+            // Mandatory in production: KMS must authenticate via the
+            // attested federated token. A missing audience must never
+            // downgrade to the (non-attested) service-account token.
+            wip_audience: Some(require("weights-wip-audience").await?),
+        }))
     }
 }
 
@@ -107,7 +126,7 @@ impl Config {
 /// and return the inference upstream `/chat` should (eventually) reach.
 /// `None` = not configured; the caller falls back to `llama::init_from_env`.
 pub async fn init(dev: bool) -> Option<String> {
-    let config = Config::resolve(dev).await?;
+    let config = resolve_with_retries(dev).await?;
     println!(
         "weights: delivering gs://{}/{} (KMS {})",
         config.bucket, config.object, config.kms_key
@@ -120,16 +139,33 @@ pub async fn init(dev: bool) -> Option<String> {
                     crate::llama::start(path);
                     return;
                 }
-                // Boot races IAM propagation on a fresh deployment; retry a
-                // few times before giving up (the VM stays up either way —
-                // /chat keeps serving errors).
+                // Boot races IAM propagation (see FETCH_ATTEMPTS); the VM
+                // stays up either way — /chat keeps serving errors.
                 Err(e) => eprintln!("weights: attempt {attempt}/{FETCH_ATTEMPTS} failed: {e}"),
             }
-            tokio::time::sleep(RETRY_DELAY).await;
+            if attempt < FETCH_ATTEMPTS {
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
         }
         eprintln!("weights: giving up; /chat will keep failing");
     });
     Some(upstream)
+}
+
+async fn resolve_with_retries(dev: bool) -> Option<Config> {
+    for attempt in 1..=RESOLVE_ATTEMPTS {
+        match Config::resolve(dev).await {
+            Ok(config) => return config,
+            Err(e) => {
+                eprintln!("weights: config resolution {attempt}/{RESOLVE_ATTEMPTS} failed: {e}")
+            }
+        }
+        if attempt < RESOLVE_ATTEMPTS {
+            tokio::time::sleep(RESOLVE_RETRY_DELAY).await;
+        }
+    }
+    eprintln!("weights: cannot resolve configuration; weights delivery disabled for this boot");
+    None
 }
 
 #[derive(Deserialize)]
@@ -184,24 +220,16 @@ async fn deliver(config: &Config) -> Result<String, String> {
         .map_err(|e| format!("manifest nonce_prefix is not base64: {e}"))?;
 
     let dest = std::env::var("WEIGHTS_DEST").unwrap_or_else(|_| DEFAULT_DEST.to_string());
-    let file = std::fs::File::create(&dest)
-        .map_err(|e| format!("cannot create {dest} (is the tmpfs mounted?): {e}"))?;
-    let mut decryptor = EnvelopeDecryptor::new(
-        &dek,
-        &nonce_prefix,
-        manifest.chunk_size,
-        std::io::BufWriter::new(file),
-    )?;
-
-    let mut body =
-        crate::gcp::gcs_get_stream(&gcs_token, &config.bucket, &manifest.ciphertext_object).await?;
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| format!("ciphertext download failed: {e}"))?;
-        if let Some(data) = frame.data_ref() {
-            decryptor.update(data)?;
+    // Any failure must remove the partial plaintext: the tmpfs is guest RAM,
+    // and a stranded multi-GB file would stay pinned for the VM's lifetime.
+    let result = stream_decrypt_to(&gcs_token, config, &manifest, &dek, &nonce_prefix, &dest).await;
+    let (size, sha256) = match result {
+        Ok(written) => written,
+        Err(e) => {
+            std::fs::remove_file(&dest).ok();
+            return Err(e);
         }
-    }
-    let (size, sha256) = decryptor.finish()?;
+    };
 
     if size != manifest.plaintext_size || hex::encode(sha256) != manifest.plaintext_sha256 {
         std::fs::remove_file(&dest).ok();
@@ -215,6 +243,35 @@ async fn deliver(config: &Config) -> Result<String, String> {
     }
     println!("weights: decrypted {size} bytes to {dest} (sha256 verified)");
     Ok(dest)
+}
+
+/// Stream the ciphertext object through the envelope decryptor into `dest`;
+/// returns the plaintext size and SHA-256 for the manifest check.
+async fn stream_decrypt_to(
+    gcs_token: &str,
+    config: &Config,
+    manifest: &Manifest,
+    dek: &[u8],
+    nonce_prefix: &[u8],
+    dest: &str,
+) -> Result<(u64, [u8; 32]), String> {
+    let file = std::fs::File::create(dest)
+        .map_err(|e| format!("cannot create {dest} (is the tmpfs mounted?): {e}"))?;
+    let mut decryptor = EnvelopeDecryptor::new(
+        dek,
+        nonce_prefix,
+        manifest.chunk_size,
+        std::io::BufWriter::new(file),
+    )?;
+    let mut body =
+        crate::gcp::gcs_get_stream(gcs_token, &config.bucket, &manifest.ciphertext_object).await?;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| format!("ciphertext download failed: {e}"))?;
+        if let Some(data) = frame.data_ref() {
+            decryptor.update(data)?;
+        }
+    }
+    decryptor.finish()
 }
 
 /// Streaming decryptor for the STREAM-BE32 envelope: feed ciphertext bytes
@@ -259,8 +316,9 @@ impl<W: Write> EnvelopeDecryptor<W> {
         // it — otherwise it might be the final segment, whose nonce carries
         // the last-flag and must wait for `finish`.
         while self.buf.len() > self.segment_size {
-            let rest = self.buf.split_off(self.segment_size);
-            let segment = std::mem::replace(&mut self.buf, rest);
+            // drain (not split_off) keeps the buffer's capacity across the
+            // ~thousand segments of a multi-GB stream.
+            let segment: Vec<u8> = self.buf.drain(..self.segment_size).collect();
             let plaintext = self
                 .stream
                 .decrypt_next(Payload {

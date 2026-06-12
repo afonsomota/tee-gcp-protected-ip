@@ -33,20 +33,30 @@ const STS_TOKEN_URL: &str = "https://sts.googleapis.com/v1/token";
 /// Space keeps fresh inside the workload container.
 const ATTESTATION_TOKEN_PATH: &str = "/run/container_launcher/attestation_verifier_claims_token";
 
+/// Bounds the time to a response *head* (and, in `request`, the collected
+/// body). Streaming bodies handed back to callers are not covered — the
+/// multi-GB ciphertext download takes as long as it takes. The bound mainly
+/// keeps boot-time config resolution from hanging the whole launcher on an
+/// unresponsive metadata endpoint.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 type HttpsClient = hyper_util::client::legacy::Client<
     hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
     Full<Bytes>,
 >;
 
-fn https_client() -> HttpsClient {
-    let connector = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_provider_and_webpki_roots(rustls::crypto::ring::default_provider())
-        .expect("webpki-roots client config")
-        .https_or_http() // plain http allowed only for the metadata server
-        .enable_http1()
-        .build();
-    hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-        .build(connector)
+fn https_client() -> &'static HttpsClient {
+    static CLIENT: std::sync::OnceLock<HttpsClient> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_provider_and_webpki_roots(rustls::crypto::ring::default_provider())
+            .expect("webpki-roots client config")
+            .https_or_http() // plain http allowed only for the metadata server
+            .enable_http1()
+            .build();
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .build(connector)
+    })
 }
 
 /// Send a request and return the response with its status, leaving the body
@@ -64,9 +74,9 @@ async fn send(
     let request = builder
         .body(Full::new(Bytes::from(body)))
         .map_err(|e| format!("failed to build request for {uri}: {e}"))?;
-    https_client()
-        .request(request)
+    tokio::time::timeout(REQUEST_TIMEOUT, https_client().request(request))
         .await
+        .map_err(|_| format!("request to {uri} timed out after {REQUEST_TIMEOUT:?}"))?
         .map_err(|e| format!("request to {uri} failed: {e}"))
 }
 
@@ -178,13 +188,17 @@ pub async fn federated_access_token(audience: &str) -> Result<String, String> {
     json_field(&response, "access_token", "STS token exchange")
 }
 
+fn gcs_media_uri(bucket: &str, object: &str) -> String {
+    format!(
+        "https://storage.googleapis.com/storage/v1/b/{bucket}/o/{}?alt=media",
+        encode_object_name(object)
+    )
+}
+
 /// Fetch a small GCS object (the manifest) into memory. Authenticates as the
 /// VM service account; confidentiality comes from KMS, not from GCS IAM.
 pub async fn gcs_get(token: &str, bucket: &str, object: &str) -> Result<Vec<u8>, String> {
-    let uri = format!(
-        "https://storage.googleapis.com/storage/v1/b/{bucket}/o/{}?alt=media",
-        encode_object_name(object)
-    );
+    let uri = gcs_media_uri(bucket, object);
     let (status, body) = request(
         Method::GET,
         &uri,
@@ -209,10 +223,7 @@ pub async fn gcs_get_stream(
     bucket: &str,
     object: &str,
 ) -> Result<hyper::body::Incoming, String> {
-    let uri = format!(
-        "https://storage.googleapis.com/storage/v1/b/{bucket}/o/{}?alt=media",
-        encode_object_name(object)
-    );
+    let uri = gcs_media_uri(bucket, object);
     let response = send(
         Method::GET,
         &uri,
@@ -236,7 +247,9 @@ pub async fn gcs_get_stream(
 /// Unwrap a KMS-wrapped DEK. With `wip_audience` set (production), the call
 /// authenticates via the attested federated token; the key's IAM grants
 /// decrypt only to the attested principalSet for the expected image digest,
-/// so a non-attested principal cannot unwrap.
+/// so a non-attested principal cannot unwrap. `None` (plain service-account
+/// token) is reachable only from the env-driven dev/test config —
+/// `artifacts::Config` makes the audience mandatory in the metadata path.
 pub async fn kms_decrypt(
     key: &str,
     wip_audience: Option<&str>,

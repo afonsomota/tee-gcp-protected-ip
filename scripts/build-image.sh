@@ -156,16 +156,20 @@ for _ in $(seq 1 50); do curl -fsS "http://$REG/v2/" >/dev/null 2>&1 && break; s
   -t "$REG/launcher:release" >/dev/null
 DIGEST="$("$CRANE" digest "$REG/launcher:release")"
 
-# No LLAMA_* variable may ever be operator-overridable: an operator who
+# No LLAMA_* variable may ever be operator-overridable (an operator who
 # could set LLAMA_UPSTREAM would point decrypted user messages at an
-# arbitrary address (launcher/src/llama.rs module docs). Fail the build if
-# the label ever appears — e.g. inherited from a future base image bump.
+# arbitrary address — launcher/src/llama.rs module docs), and the entrypoint
+# args must not be either (cmd override could pass --dev to /launcher).
+# Fail the build if either label ever appears — e.g. inherited from a
+# future base image bump.
 "$CRANE" config "$REG/launcher:release" | python3 -c '
 import json, sys
 labels = json.load(sys.stdin)["config"].get("Labels") or {}
-if "tee.launch_policy.allow_env_override" in labels:
-    sys.exit("FATAL: tee.launch_policy.allow_env_override label present on "
-             "the release image: " + labels["tee.launch_policy.allow_env_override"])
+for forbidden in ("tee.launch_policy.allow_env_override",
+                  "tee.launch_policy.allow_cmd_override"):
+    if forbidden in labels:
+        sys.exit("FATAL: %s label present on the release image: %s"
+                 % (forbidden, labels[forbidden]))
 if labels.get("tee.launch_policy.log_redirect") != "always":
     sys.exit("FATAL: tee.launch_policy.log_redirect=always label missing")
 if labels.get("tee.launch_policy.allow_mount_destinations") != "/models":

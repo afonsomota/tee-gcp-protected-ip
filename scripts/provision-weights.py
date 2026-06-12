@@ -64,6 +64,18 @@ DEFAULT_MODEL_URL = (
 HF_TOKEN_PATH = Path.home() / ".cache" / "huggingface" / "token"
 
 
+def _read_full(reader, n: int) -> bytes:
+    """Read exactly n bytes unless EOF intervenes (read() may return short
+    for raw/socket streams; segment boundaries must stay chunk-aligned)."""
+    buf = bytearray()
+    while len(buf) < n:
+        block = reader.read(n - len(buf))
+        if not block:
+            break
+        buf.extend(block)
+    return bytes(buf)
+
+
 def encrypt_stream(reader, writer, dek: bytes, nonce_prefix: bytes,
                    chunk_size: int = CHUNK_SIZE) -> tuple[int, str]:
     """Seal reader→writer in STREAM BE32 segments; return (size, sha256hex).
@@ -77,9 +89,9 @@ def encrypt_stream(reader, writer, dek: bytes, nonce_prefix: bytes,
     digest = hashlib.sha256()
     size = 0
     counter = 0
-    chunk = reader.read(chunk_size)
+    chunk = _read_full(reader, chunk_size)
     while True:
-        next_chunk = reader.read(chunk_size)
+        next_chunk = _read_full(reader, chunk_size)
         last = not next_chunk
         digest.update(chunk)
         size += len(chunk)
@@ -279,17 +291,25 @@ def main() -> None:
 
     print("[1/4] model")
     model = download_model(args.model_url, args.cache_dir)
-    local_sha = sha256_file(model)
 
     manifest_object = f"{args.object_prefix}{model.name}.manifest.json"
     ciphertext_object = f"{args.object_prefix}{model.name}.enc"
     token = access_token()
 
     print("[2/4] idempotency check")
+    # A manifest counts as current only if every parameter the launcher acts
+    # on matches what this run would produce — a manifest sealed under an old
+    # format, chunk size, or a different KMS key must be re-provisioned, not
+    # reported as "nothing to do". The (slow) local hash runs only when the
+    # cheap field checks pass.
     existing = gcs_get_json(token, bucket, manifest_object)
     if (
         existing
-        and existing.get("plaintext_sha256") == local_sha
+        and existing.get("format") == ENVELOPE_FORMAT
+        and existing.get("cipher") == CIPHER
+        and existing.get("chunk_size") == CHUNK_SIZE
+        and existing.get("kms_key") == kms_key
+        and existing.get("plaintext_sha256") == sha256_file(model)
         and gcs_object_exists(token, bucket, existing.get("ciphertext_object", ""))
     ):
         print("  bucket already holds this model — nothing to do")
@@ -303,7 +323,6 @@ def main() -> None:
         enc_path = Path(tmp.name)
         with model.open("rb") as plain:
             size, sha = encrypt_stream(plain, tmp, dek, nonce_prefix)
-    assert sha == local_sha
     wrapped_dek = kms_wrap(token, kms_key, dek)
     del dek  # the only plaintext copy of the key material in this process
 

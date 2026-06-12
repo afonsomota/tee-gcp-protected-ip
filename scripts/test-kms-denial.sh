@@ -30,9 +30,8 @@ VM="kms-denial-test-$RANDOM"
 log() { printf '>> %s\n' "$*" >&2; }
 
 log "reading manifest gs://$BUCKET/$OBJECT"
-MANIFEST="$(gcloud storage cat "gs://$BUCKET/$OBJECT" --project "$PROJECT")"
-WRAPPED_DEK="$(printf '%s' "$MANIFEST" | python3 -c 'import json,sys; print(json.load(sys.stdin)["wrapped_dek"])')"
-KMS_KEY="$(printf '%s' "$MANIFEST" | python3 -c 'import json,sys; print(json.load(sys.stdin)["kms_key"])')"
+read -r WRAPPED_DEK KMS_KEY < <(gcloud storage cat "gs://$BUCKET/$OBJECT" --project "$PROJECT" \
+  | python3 -c 'import json,sys; m=json.load(sys.stdin); print(m["wrapped_dek"], m["kms_key"])')
 log "key under test: $KMS_KEY"
 
 # Runs on the plain VM: service-account token from the metadata server, then
