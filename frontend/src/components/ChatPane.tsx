@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatMessage } from "../attest/chat";
 import { hpkeChat } from "../attest/chat";
 import type { AttestationStatus } from "../attest/session";
-import { runAttestation } from "../attest/session";
+import { NETWORK_ERROR_CODE, runAttestation } from "../attest/session";
+import { AttestationError } from "../attest/verify";
 import { config } from "../lib/config";
 import { AttestationBadge } from "./AttestationBadge";
 
@@ -20,10 +21,7 @@ export function ChatPane() {
       const result = await runAttestation(config.apiEndpoint, config.expectedImageDigest);
       setAttestStatus({ kind: "verified", ...result });
     } catch (err) {
-      const code =
-        err != null && typeof err === "object" && "code" in err
-          ? String((err as { code: unknown }).code)
-          : "ERROR";
+      const code = err instanceof AttestationError ? err.code : NETWORK_ERROR_CODE;
       const detail = err instanceof Error ? err.message : String(err);
       setAttestStatus({ kind: "failed", code, detail });
     }
@@ -40,8 +38,9 @@ export function ChatPane() {
   const canChat = attestStatus.kind === "verified";
 
   async function handleSend() {
-    if (!canChat || input.trim() === "" || sending) return;
-    const hpkeKey = (attestStatus as { hpkePublicKey: Uint8Array }).hpkePublicKey;
+    // Narrowing the discriminated union gates chat AND types hpkePublicKey.
+    if (attestStatus.kind !== "verified" || input.trim() === "" || sending) return;
+    const hpkeKey = attestStatus.hpkePublicKey;
 
     const userMessage: ChatMessage = { role: "user", content: input.trim() };
     const nextHistory = [...history, userMessage];

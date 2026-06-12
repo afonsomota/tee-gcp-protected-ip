@@ -1,16 +1,28 @@
 import type { AttestationStatus } from "../attest/session";
+import { NETWORK_ERROR_CODE } from "../attest/session";
+import type { FailureCode } from "../attest/verify";
 
 interface Props {
   status: AttestationStatus;
   onRetry: () => void;
 }
 
-const FAILURE_LABELS: Record<string, string> = {
+// Typed against the FailureCode union so a new failure mode without a
+// human-readable label is a compile error.
+const FAILURE_LABELS: Record<FailureCode | typeof NETWORK_ERROR_CODE, string> = {
   TOKEN_SIGNATURE_INVALID: "Token signature invalid",
   CHALLENGE_MISMATCH: "Challenge mismatch (possible replay)",
   IMAGE_DIGEST_MISMATCH: "Image digest mismatch — wrong workload",
   KEY_HASH_MISMATCH: "Key not bound in attestation token",
+  ATTESTATION_FETCH_FAILED: "Could not fetch attestation token",
+  KEY_FETCH_FAILED: "Could not fetch enclave key",
+  DEV_TOKEN_REJECTED: "Unsigned dev token rejected (production build)",
+  NETWORK_ERROR: "Could not reach the enclave",
 };
+
+function failureLabel(code: string): string {
+  return code in FAILURE_LABELS ? FAILURE_LABELS[code as keyof typeof FAILURE_LABELS] : code;
+}
 
 export function AttestationBadge({ status, onRetry }: Props) {
   if (status.kind === "idle" || status.kind === "verifying") {
@@ -29,7 +41,10 @@ export function AttestationBadge({ status, onRetry }: Props) {
         <span>
           <strong>Enclave not verified</strong>
           {" — "}
-          {FAILURE_LABELS[status.code] ?? status.code}
+          {failureLabel(status.code)}
+          {status.detail !== "" && (
+            <span className="attest-badge__detail">{status.detail}</span>
+          )}
         </span>
         <button className="attest-badge__retry secondary" onClick={onRetry}>
           Retry

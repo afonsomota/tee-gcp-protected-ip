@@ -244,6 +244,14 @@ textarea {
   background: #d04545;
 }
 
+.attest-badge__detail {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: normal;
+  opacity: 0.85;
+  overflow-wrap: anywhere;
+}
+
 .attest-badge__link {
   color: inherit;
   font-size: 0.75rem;

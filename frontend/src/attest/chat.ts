@@ -6,7 +6,8 @@
  * ephemeral reply key. The enclave unseals it, runs inference, and returns
  * an HPKE-sealed reply encrypted to the ephemeral key.
  *
- * Info strings must match launcher/src/hpke_channel.rs.
+ * Info strings and the request/response plaintext shapes must match
+ * launcher/src/chat.rs.
  */
 import { type Envelope, b64encode, makeSuite, open, seal } from "./hpke";
 
@@ -21,6 +22,16 @@ export interface ChatMessage {
 const utf8 = new TextEncoder();
 
 /**
+ * Build the /chat request plaintext. Field names pin the launcher's wire
+ * format (`ChatRequest` in launcher/src/chat.rs): `messages` is the full
+ * conversation oldest-first, `reply_pub` the base64 raw 32-byte X25519 key
+ * the response is sealed to.
+ */
+export function buildChatPayload(history: ChatMessage[], replyPub: Uint8Array): string {
+  return JSON.stringify({ messages: history, reply_pub: b64encode(replyPub) });
+}
+
+/**
  * Send the full chat history to /chat and return the model's plaintext reply.
  * Only ciphertext crosses the wire in either direction.
  */
@@ -33,7 +44,7 @@ export async function hpkeChat(
   const replyKeyPair = await suite.kem.generateKeyPair();
   const replyPub = new Uint8Array(await suite.kem.serializePublicKey(replyKeyPair.publicKey));
 
-  const requestPayload = JSON.stringify({ history, reply_pub: b64encode(replyPub) });
+  const requestPayload = buildChatPayload(history, replyPub);
   const envelope = await seal(
     enclavePublicKey,
     utf8.encode(CHAT_REQUEST_INFO),

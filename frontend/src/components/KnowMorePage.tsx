@@ -108,9 +108,39 @@ export function KnowMorePage({ onBack }: Props) {
         <section>
           <h2>Verify it yourself</h2>
           <p>
-            The enclave code is open source. You can build it, check the image digest, and run{" "}
-            <code>scripts/verify-attestation.py</code> to verify the attestation token outside the
-            browser. Instructions are in the repository README.
+            The enclave code is{" "}
+            <a
+              href="https://github.com/afonsomota/tee-gcp-protected-ip"
+              target="_blank"
+              rel="noreferrer"
+            >
+              open source
+            </a>
+            . You can build it, check the image digest, and run{" "}
+            <a
+              href="https://github.com/afonsomota/tee-gcp-protected-ip/blob/main/scripts/verify-attestation.py"
+              target="_blank"
+              rel="noreferrer"
+            >
+              <code>scripts/verify-attestation.py</code>
+            </a>{" "}
+            to verify the attestation token outside the browser. Step-by-step instructions are in{" "}
+            <a
+              href="https://github.com/afonsomota/tee-gcp-protected-ip/blob/main/docs/verifying.md"
+              target="_blank"
+              rel="noreferrer"
+            >
+              the verify-it-yourself guide
+            </a>{" "}
+            and{" "}
+            <a
+              href="https://github.com/afonsomota/tee-gcp-protected-ip/blob/main/README.md"
+              target="_blank"
+              rel="noreferrer"
+            >
+              the repository README
+            </a>
+            .
           </p>
         </section>
       </article>

@@ -27,7 +27,11 @@ export type FailureCode =
   | "TOKEN_SIGNATURE_INVALID"
   | "CHALLENGE_MISMATCH"
   | "IMAGE_DIGEST_MISMATCH"
-  | "KEY_HASH_MISMATCH";
+  | "KEY_HASH_MISMATCH"
+  // Thrown by session.ts (runAttestation), not by this module:
+  | "ATTESTATION_FETCH_FAILED"
+  | "KEY_FETCH_FAILED"
+  | "DEV_TOKEN_REJECTED";
 
 export class AttestationError extends Error {
   readonly code: FailureCode;
