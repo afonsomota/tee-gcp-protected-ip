@@ -148,7 +148,10 @@ gcloud iam workload-identity-pools providers create-oidc attestation-verifier \
 > release pipeline: `make image` (reproducible build, prints digest D),
 > `make push PROJECT_ID=...` (push by digest), `make deploy PROJECT_ID=...`
 > (pin D into the CVM and apply) — see the root `README.md` and
-> `.github/workflows/release.yml`.
+> `.github/workflows/release.yml`. Run `make mirror-base PROJECT_ID=...`
+> once per base-image bump to mirror the pinned llama.cpp base into
+> Artifact Registry under a per-digest tag, so every pin stays mirrored
+> across bumps (verifier rebuilds must not depend on ghcr retention).
 
 ```sh
 gcloud auth configure-docker europe-west4-docker.pkg.dev

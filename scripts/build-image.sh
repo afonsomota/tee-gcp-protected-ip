@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
-# Canonical, deterministic launcher image build (spike 001, issue 012).
+# Canonical, deterministic launcher image build (spikes 001+002, issues #12/#29).
 #
 # This script IS the release recipe and the verify-it-yourself instructions:
 # run it from the tagged source and the resulting manifest digest must equal
 # the published release digest D. It needs docker, python3, and curl; the
 # crane binary is downloaded (pinned version, checksum-verified) into
 # dist/tools/. Network is used only for crates.io (content-addressed via the
-# committed Cargo.lock), the pinned apk package, and the tool downloads —
-# none of it is trusted: every input is pinned below, and the output digest
-# is the proof.
+# committed Cargo.lock), the pinned apk package, the digest-pinned base
+# image, and the tool downloads — none of it is trusted: every input is
+# pinned below, and the output digest is the proof.
 #
 # Steps:
 #   1. Build launcher as a static x86_64-unknown-linux-musl binary inside a
 #      digest-pinned Rust container at a fixed in-container path (/build).
 #   2. Pack it as a metadata-stripped USTAR tar (scripts/make-layer-tar.py).
-#   3. crane append onto an empty OCI base + crane mutate (entrypoint,
-#      Confidential Space log_redirect label, platform) -> manifest digest D.
-#      crane is version-pinned: it gzips the layer, so its output is a
-#      digest input. The ephemeral local registry is transport only and
-#      does not influence D.
+#   3. crane append onto the digest-pinned llama.cpp server base image +
+#      crane mutate (entrypoint, Confidential Space log_redirect label,
+#      LLAMA_ARG_HOST, platform) -> manifest digest D. crane is
+#      version-pinned: it gzips the layer, so its output is a digest input.
+#      The ephemeral local registry is transport only and does not
+#      influence D.
+#
+# Trust note on the base (spike 002): the launcher layer is re-derived from
+# source — zero trust in anyone. The base image's bytes (llama-server and
+# its Ubuntu userland) are upstream's public content-addressed artifact at
+# the pinned digest — the same image everyone pulls — but are NOT re-derived
+# from source here. Rebuilding from source is recorded as future hardening.
 #
 # Outputs (in dist/):
 #   image-digest.txt   D, the value pinned everywhere
@@ -30,11 +37,22 @@ cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
 DIST="$REPO_ROOT/dist"
 
-# ---- pinned inputs (recipe version 1) --------------------------------------
-RECIPE_VERSION=1
+# ---- pinned inputs (recipe version 2) --------------------------------------
+RECIPE_VERSION=2
 # rust:1.88.0-alpine3.22, linux/amd64 platform image (not the multi-arch index)
 RUST_IMAGE="rust@sha256:64eba3726734dcfe89e0a62a0485007a3ab7c7372ce5b38c621d8812f70215f0"
 RUST_IMAGE_HUMAN="rust:1.88.0-alpine3.22 (linux/amd64)"
+# Base image the launcher layer is appended onto: the official llama.cpp
+# server image, pinned to its linux/amd64 PLATFORM manifest digest (not the
+# multi-arch index — crane append needs a concrete image). Provides
+# /app/llama-server, which the launcher supervises (launcher/src/llama.rs).
+LLAMA_BASE_DIGEST="sha256:0777ae6f06757ee26dac401a908f810ae70c1c62ef81d45376ab7febd48d6289"
+LLAMA_BASE_HUMAN="ghcr.io/ggml-org/llama.cpp:server b9592 (linux/amd64)"
+# Where to pull the base from. The digest pin makes the source trust-neutral
+# (content-addressed); override with the Artifact Registry mirror
+# (`make mirror-base`) if ghcr is unreachable or has dropped the tag:
+#   LLAMA_BASE_SOURCE=REGION-docker.pkg.dev/PROJECT/tee-example/llama.cpp make image
+LLAMA_BASE_SOURCE="${LLAMA_BASE_SOURCE:-ghcr.io/ggml-org/llama.cpp}"
 # ring (via rcgen) compiles C against musl headers; the exact-version pin
 # fails loudly if Alpine 3.22 rolls the package, instead of silently
 # changing the digest. (Alpine keeps only the latest version per branch, so
@@ -118,16 +136,35 @@ REG="$(docker port "$REG_ID" 5000/tcp | head -n1 | sed 's/^.*:/localhost:/')"
 # wait for the registry to accept connections
 for _ in $(seq 1 50); do curl -fsS "http://$REG/v2/" >/dev/null 2>&1 && break; sleep 0.2; done
 
-"$CRANE" append --oci-empty-base -f "$DIST/layer.tar" -t "$REG/launcher:rc" >/dev/null
+"$CRANE" append -b "$LLAMA_BASE_SOURCE@$LLAMA_BASE_DIGEST" \
+  -f "$DIST/layer.tar" -t "$REG/launcher:rc" >/dev/null
 # Keep the Confidential Space launch-policy label: without
 # tee.launch_policy.log_redirect=always the production image gives the
 # container no stdout and the VM self-terminates right after launch.
+# LLAMA_ARG_HOST overrides the base image's 0.0.0.0 default — the launcher
+# already passes --host 127.0.0.1 explicitly, but nothing in the image may
+# even default to binding the model to a public interface.
 "$CRANE" mutate "$REG/launcher:rc" \
   --set-platform linux/amd64 \
   --entrypoint /launcher \
+  --env LLAMA_ARG_HOST=127.0.0.1 \
   --label tee.launch_policy.log_redirect=always \
   -t "$REG/launcher:release" >/dev/null
 DIGEST="$("$CRANE" digest "$REG/launcher:release")"
+
+# No LLAMA_* variable may ever be operator-overridable: an operator who
+# could set LLAMA_UPSTREAM would point decrypted user messages at an
+# arbitrary address (launcher/src/llama.rs module docs). Fail the build if
+# the label ever appears — e.g. inherited from a future base image bump.
+"$CRANE" config "$REG/launcher:release" | python3 -c '
+import json, sys
+labels = json.load(sys.stdin)["config"].get("Labels") or {}
+if "tee.launch_policy.allow_env_override" in labels:
+    sys.exit("FATAL: tee.launch_policy.allow_env_override label present on "
+             "the release image: " + labels["tee.launch_policy.allow_env_override"])
+if labels.get("tee.launch_policy.log_redirect") != "always":
+    sys.exit("FATAL: tee.launch_policy.log_redirect=always label missing")
+'
 
 rm -rf "$DIST/oci-layout"
 "$CRANE" pull --format=oci "$REG/launcher:release" "$DIST/oci-layout" >/dev/null
@@ -138,6 +175,8 @@ cat > "$DIST/release-pins.txt" <<EOF
 recipe_version=$RECIPE_VERSION
 rust_image=$RUST_IMAGE
 rust_image_human=$RUST_IMAGE_HUMAN
+llama_base_image=ghcr.io/ggml-org/llama.cpp@$LLAMA_BASE_DIGEST
+llama_base_image_human=$LLAMA_BASE_HUMAN
 musl_dev_pkg=$MUSL_DEV_PKG
 crane_version=$CRANE_VERSION
 binary_sha256=$BINARY_SHA256

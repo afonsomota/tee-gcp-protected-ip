@@ -125,7 +125,7 @@ assumption entirely.
 ## Step 6 — Rebuild from source and re-derive the digest
 
 The released image is produced by a fully pinned, deterministic recipe
-(`scripts/build-image.sh`, ~150 lines — read it too). Run it yourself from
+(`scripts/build-image.sh`, ~200 lines — read it too). Run it yourself from
 the tagged source:
 
 ```sh
@@ -138,13 +138,38 @@ or let the CLI do exactly that with `--rebuild` (or hand it a digest you
 already derived with `--rebuilt-digest sha256:...`). Compare against the
 attested digest from step 4.
 
+The rebuild pulls one pinned base image — the official llama.cpp server
+image, which provides the `llama-server` binary the launcher supervises —
+from ghcr.io by digest. The operator also mirrors it by digest into
+Artifact Registry (`make mirror-base`), so rebuilds of old releases never
+depend on ghcr retention. Content-addressing makes the pull source
+trust-neutral — both yield the same bytes or fail loudly:
+
+```sh
+LLAMA_BASE_SOURCE=REGION-docker.pkg.dev/PROJECT/tee-example/llama.cpp make image
+```
+
+(If you load the rebuilt image into Docker and run it locally to poke at
+`/echo`, `docker ps` will report the container `unhealthy`: the llama.cpp
+base image carries a `HEALTHCHECK` that probes `llama-server`, which never
+starts in a weightless release build — `/chat` serves 503. The status is
+expected and cosmetic; Confidential Space ignores Docker healthchecks.)
+
 **Proven:** the digest is a pure function of the public source at that
-commit. No build service, registry, operator, or CI is trusted — if any of
-them had tampered with the image, your locally derived digest would differ
-and step 6 would fail. Combined with step 4, you now know the enclave runs
-*exactly* the code you (or any auditor) can read: `launcher/src/`, its
-locked dependency tree (`Cargo.lock`), and nothing else — the image is a
-single layer containing a single static binary on an empty base.
+commit plus one pinned public artifact. No build service, registry,
+operator, or CI is trusted — if any of them had tampered with the image,
+your locally derived digest would differ and step 6 would fail. Combined
+with step 4, the claim splits per component (spike 002):
+
+| Component | What your rebuild proves |
+|---|---|
+| launcher (the appended layer) | bytes re-derived on your machine from `launcher/src/` and its locked dependency tree (`Cargo.lock`) — zero trust in anyone |
+| llama-server (the base image) | bytes are exactly the public artifact ggml-org published at the pinned digest — content-addressed, the same image everyone pulls; the bytes↔source link rests on upstream's release process |
+
+A backdoor in `llama-server` would have to live in the public artifact used
+by everyone, not in something targeted at this deployment. Building it
+reproducibly from source too is recorded as future hardening
+(`docs/spikes/002-llama-server-in-release-image.md`).
 
 **Still assumed (the floor you cannot verify away):**
 
@@ -156,9 +181,12 @@ single layer containing a single static binary on an empty base.
 - The pinned toolchain (the digest-pinned Rust image, `crane`) doesn't
   contain a reproducible-on-purpose backdoor — mitigated by the pins being
   public, auditable, and upstream artifacts used by many parties.
+- The pinned llama.cpp base image faithfully corresponds to its public
+  source: your rebuild fixes its bytes, but does not re-derive them (the
+  table above).
 - Known wrinkle: one build input (`musl-dev`, pinned by exact version) comes
   from Alpine's package repo, which keeps only the latest version per
-  branch. When Alpine rolls it, rebuilds of *older* tags fai rather
+  branch. When Alpine rolls it, rebuilds of *older* tags fail loudly rather
   than producing a different digest (the README documents this and the
   planned fix).
 

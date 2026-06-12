@@ -1,10 +1,15 @@
-# Reproducible launcher release (issue 012, spike 001).
+# Reproducible release image (issues #12/#29, spikes 001+002).
 #
 # Tagging v* runs the deterministic build recipe (scripts/build-image.sh,
 # the same `make image` any verifier runs) twice, on two independent runner
 # VMs that share no state, and blocks the release unless both derive the
 # identical image manifest digest D. Only then is the image pushed by digest
 # to Artifact Registry and a GitHub artifact attestation published.
+#
+# Recipe v2 (issue #29, docs/spikes/002-llama-server-in-release-image.md):
+# the reproducible launcher layer is appended onto the digest-pinned
+# official llama.cpp server base image, so D covers both the re-derivable
+# launcher bytes and the pinned public base that provides llama-server.
 #
 # Trust model (see README.md): GitHub is NOT a trust anchor here — a
 # compromised CI would produce a digest that any independent rebuild from
