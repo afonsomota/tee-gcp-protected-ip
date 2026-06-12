@@ -1,15 +1,54 @@
 # tee-example
 
-A demo of hardware-backed privacy guarantees: a journal app with a chatbot
-where user data is processed only by open-source, auditable code inside a GCP
-Confidential Space CVM (AMD SEV-SNP). Architecture and trust model:
-`docs/DESIGN.md`. Deploy instructions: `infra/README.md`.
+A demo of hardware-backed privacy guarantees: a journal app with a chatbot,
+built to show how a company can make this pitch to its users — and have it
+be *checkable*, not a promise:
+
+> *"Your journal entries are processed only by open-source code running in a
+> machine you can cryptographically verify. We cannot read your data — and
+> neither can our cloud provider. Our proprietary code runs inside that
+> machine too, but in a sandbox that the open code provably constrains:
+> nothing leaves except the reply you see."*
+
+Concretely: entries live encrypted in your browser (no server-side accounts
+or data at rest), and are processed only inside a GCP Confidential Space CVM
+(AMD SEV-SNP) running an open, audited launcher whose container image digest
+is attested by the hardware and re-derivable from this source code by
+anyone. The company's closed model-orchestration code runs inside that same
+enclave — as a deny-by-default WebAssembly sandbox the open code cages. The
+company keeps its IP closed *without asking users to trust closed code*.
+
+Don't take the README's word for any of this:
+
+```sh
+./scripts/verify-chain.py --url https://HOST --rebuild
+```
+
+walks the whole chain against a live deployment — fresh attestation token →
+Google's signature → attested image digest → the GitHub release and git
+commit that published it → a from-source rebuild on your machine that
+re-derives the same digest. [docs/verifying.md](docs/verifying.md) explains
+what each step proves.
+
+## Documentation
+
+| Doc | What it covers |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | components, data flows, and the open/closed boundary |
+| [docs/threat-model.md](docs/threat-model.md) | the two TCBs (user privacy vs company IP), what each party can and cannot do, what's out of scope |
+| [docs/verifying.md](docs/verifying.md) | verify it yourself, step by step — what each step proves and what's still assumed |
+| [docs/DESIGN.md](docs/DESIGN.md) | the original design document: every major decision and its rationale |
+| [docs/spikes/001-deterministic-oci-digest.md](docs/spikes/001-deterministic-oci-digest.md) | why reproducible builds are the trust anchor (and what was rejected) |
+| [infra/README.md](infra/README.md) | deploy runbook (Terraform, two roots) |
+| [frontend/README.md](frontend/README.md) | run the frontend locally; the trust-on-first-use caveat |
+
+## Layout
 
 - `launcher/` — the open, audited TCB that runs inside the enclave (Rust)
 - `frontend/` — local-first SPA; client-side encryption, in-browser
   attestation verification (React + TypeScript)
 - `infra/` — Terraform for the Confidential Space CVM
-- `scripts/` — standalone attestation verifier and the release build recipe
+- `scripts/` — the verifier CLIs and the release build recipe
 
 ## Reproducible releases and the build-time trust model
 
@@ -42,7 +81,9 @@ make digest    # re-prints dist/image-digest.txt
 
 Compare against the digest published on the GitHub release and against a
 live enclave with `./scripts/verify-attestation.py --url https://<host> \
---image-digest <D>`.
+--image-digest <D>` — or run the whole chain, release lookup and rebuild
+included, with `./scripts/verify-chain.py --url https://<host> --rebuild`
+([docs/verifying.md](docs/verifying.md)).
 
 Known limitation: one recipe input (the `musl-dev` apk package, needed to
 compile `ring`'s C code) is pinned by exact version, but Alpine keeps only
