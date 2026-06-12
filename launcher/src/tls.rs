@@ -8,8 +8,9 @@
 //! (`acme_cache.rs` has the rationale and the rate-limit arithmetic).
 //!
 //! Outbound TLS to the ACME directory uses compiled-in `webpki-roots`
-//! (rustls-acme is built with its `webpki-roots` feature): the runtime image
-//! is `scratch` with no CA bundle, so filesystem trust discovery would fail.
+//! (rustls-acme is built with its `webpki-roots` feature): the trust anchors
+//! are pinned by the audited, reproducible build instead of inherited from
+//! whatever CA bundle the runtime base image happens to ship.
 //!
 //! Threat model: TLS here is defense-in-depth and ordinary web hygiene; the
 //! user-facing privacy guarantee rides on the attested HPKE channel, not on

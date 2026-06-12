@@ -19,6 +19,10 @@ base64 = "0.22.1"
 tower-http = { version = "0.6.11", features = ["cors"] }
 rand = "0.9"
 rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tokio", "axum", "webpki-roots"] }
+# Feature unification only — no rustls code is used directly. rustls-acme
+# alone resolves rustls to {ring, std}; this entry adds tls12 so TLS-1.2-only
+# clients can still connect, and pins the provider choice (ring, never the
+# default aws-lc-rs) explicitly at the workspace level.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 axum-server = "0.8"
 async-trait = "0.1"

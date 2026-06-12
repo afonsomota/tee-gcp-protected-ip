@@ -109,9 +109,3 @@ variable "acme_directory" {
     error_message = "acme_directory must be letsencrypt, letsencrypt-staging, or an https:// directory URL."
   }
 }
-
-variable "https_port" {
-  description = "HTTPS port the launcher serves TLS on"
-  type        = number
-  default     = 443
-}

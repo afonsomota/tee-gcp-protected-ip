@@ -45,10 +45,15 @@ resource "google_project_service" "apis" {
     "compute.googleapis.com",
     "confidentialcomputing.googleapis.com",
     "artifactregistry.googleapis.com",
+    # Service-account management: the main root creates the workload SA;
+    # also needed to manage the workload identity pool + release SA that
+    # the release workflow's registry push authenticates through.
     "iam.googleapis.com",
     # Mints workload-identity-federation access tokens; without it the
     # release workflow's registry push fails at the GCP auth step.
     "iamcredentials.googleapis.com",
+    # Exchanges the GitHub OIDC token for GCP credentials — the first half
+    # of the same workload-identity-federation auth step.
     "sts.googleapis.com",
   ])
   service            = each.value

@@ -3,6 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "PyJWT[crypto]>=2.8",
+#   "cryptography>=42",
 #   "requests>=2.31",
 # ]
 # ///
@@ -13,7 +14,9 @@ docs/verifying.md):
 
   1. fetch a fresh attestation token from the enclave (random nonce)
   2. verify Google's Confidential Space signature (JWKS)
-  3. check the claims: issuer, audience, our nonce echoed in eat_nonce
+  3. check the claims: issuer, audience, our nonce echoed in eat_nonce —
+     and, for https URLs, that the served TLS certificate's key matches
+     the token's tls: binding
   4. read the attested container image digest
   5. match that digest to a published GitHub release -> tag + git commit
   6. optionally re-derive the digest from the tagged source with the
@@ -192,7 +195,13 @@ def main() -> int:
 
     # -- 3. claims (verifying.md step 3) --------------------------------------
     print("==> 3. check claims")
-    ok &= report(check_claims(claims, args.audience, nonce))
+    claim_results = check_claims(claims, args.audience, nonce)
+    if args.url.startswith("https://"):
+        claim_results.append(va.check_tls_binding(claims, va.fetch_served_cert(args.url)))
+    else:
+        claim_results.append(("tls_binding", None,
+                              "plain-HTTP URL — no served certificate to compare"))
+    ok &= report(claim_results)
 
     # -- 4. attested digest (verifying.md step 4) -----------------------------
     print("==> 4. read attested image digest")

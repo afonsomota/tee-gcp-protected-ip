@@ -125,7 +125,7 @@ trusted build service). [verifying.md](verifying.md) walks the whole chain.
 | journal entries, embeddings, metadata | browser IndexedDB only | encrypted client-side (passphrase → Argon2id → master key) |
 | chat/session plaintext | enclave memory, per session | SEV-SNP memory encryption; never written |
 | model weights, harness blob | GCS, encrypted | KMS key released only to the attested digest [#7] |
-| ACME/TLS cert state | GCS, KMS-wrapped [#4] | company-operational, no user data |
+| ACME/TLS cert state | enclave memory only — fresh account + cert per boot [#4] | dies with the instance; nothing cloud-side |
 | user accounts | — | none exist; login *is* client-side key derivation |
 
 [#4]: https://github.com/afonsomota/tee-gcp-protected-ip/issues/4

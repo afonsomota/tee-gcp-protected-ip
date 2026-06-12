@@ -92,7 +92,7 @@ Instead of Terraform you can run the equivalent gcloud one-liners — plus the
 state bucket, which the `infra/` root still needs:
 
 ```sh
-gcloud services enable compute.googleapis.com confidentialcomputing.googleapis.com artifactregistry.googleapis.com iamcredentials.googleapis.com
+gcloud services enable compute.googleapis.com confidentialcomputing.googleapis.com artifactregistry.googleapis.com iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com
 gcloud artifacts repositories create tee-example --repository-format=docker --location=europe-west4
 gcloud compute addresses create tee-example-cvm --region=europe-west4
 gcloud storage buckets create gs://YOUR_PROJECT_ID-tfstate --location=europe-west4 \
@@ -243,8 +243,11 @@ Notes:
   demos, not for tight redeploy loops. New-account registration (also fresh
   per boot) allows 10 per IP per 3 hours.
 - **Cert/key binding.** The attestation token's `tls:` eat_nonce is the
-  SHA-256 of the serving certificate key's SubjectPublicKeyInfo DER; compare
-  with `openssl s_client -connect api.YOUR_DOMAIN:443 | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | sha256sum`.
+  SHA-256 of the serving certificate key's SubjectPublicKeyInfo DER.
+  `verify-attestation.py` checks this automatically when given an `https://`
+  URL (it fetches the served certificate and compares the hashes, retrying
+  once on mismatch to ride out a renewal rebind). Manual cross-check:
+  `openssl s_client -connect api.YOUR_DOMAIN:443 | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | sha256sum`.
 
 ## Inference footprint & boot time
 

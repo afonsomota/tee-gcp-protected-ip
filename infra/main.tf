@@ -121,7 +121,11 @@ resource "google_compute_firewall" "allow_http" {
 
   allow {
     protocol = "tcp"
-    ports    = local.tls_enabled ? [tostring(var.http_port), tostring(var.https_port)] : [tostring(var.http_port)]
+    # The launcher binds either plain HTTP or HTTPS, never both (main.rs):
+    # open only the port that is actually listening. 443 is fixed — the
+    # TLS-ALPN-01 challenge validates on 443 only, and the image's
+    # allow_env_override label admits no port override.
+    ports = local.tls_enabled ? ["443"] : [tostring(var.http_port)]
   }
 
   source_ranges = ["0.0.0.0/0"]
@@ -195,6 +199,14 @@ resource "google_compute_instance" "cvm" {
     precondition {
       condition     = terraform.workspace == local.expected_workspace
       error_message = "deployment_suffix \"${var.deployment_suffix}\" belongs in workspace \"${local.expected_workspace}\", but \"${terraform.workspace}\" is selected. Run `terraform -chdir=infra workspace select ${local.expected_workspace}` (or use make deploy / make dev-deploy)."
+    }
+
+    # TLS needs the domain's A record to resolve to this VM, and only prod
+    # gets the bootstrap static IP the record points at. A dev deployment
+    # takes an ephemeral IP, so ACME validation could never succeed there.
+    precondition {
+      condition     = local.is_prod || !local.tls_enabled
+      error_message = "tls_domain is prod-only: a dev deployment (deployment_suffix set) gets an ephemeral IP, so the domain's A record cannot reach it and ACME validation would always fail."
     }
   }
 }

@@ -74,11 +74,14 @@ challenge, not replayed from an earlier boot or a different machine.
 
 `eat_nonce` also carries two extra entries the *enclave* bound at issuance:
 `hpke:<sha256 of the enclave's HPKE public key>` and `tls:<sha256 of its TLS
-key>`. These are how the browser knows the key it encrypts to lives inside
-the attested enclave and not in a middlebox — the frontend checks the served
-key against this hash on every session (`frontend/src/attest/verify.ts`). The
-CLI doesn't establish an encrypted session, so it only confirms your own
-nonce; the key-binding entries are visible in the printed claims.
+key>`. These are how a client knows the keys it talks to live inside the
+attested enclave and not in a middlebox. Each verifier checks the binding it
+can see: the frontend checks the served HPKE key against the `hpke:` hash on
+every session (`frontend/src/attest/verify.ts`) but *cannot* check `tls:` —
+browsers expose no API to read the serving certificate. The CLI covers that
+side: given an `https://` URL it hashes the served certificate's key and
+compares it with the `tls:` entry; it doesn't establish an HPKE session, so
+the `hpke:` entry stays the frontend's job.
 
 **Still assumed:** what code is actually running.
 

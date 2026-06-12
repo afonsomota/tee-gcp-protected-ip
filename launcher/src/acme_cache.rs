@@ -23,7 +23,8 @@
 //! [`EnclaveKeys::set_tls_spki`]. rustls-acme deploys a new cert to its
 //! resolver immediately before calling `store_cert`, so tokens minted after
 //! the swap hash the serving key; the window in between is a single
-//! scheduler tick and a verifier that hits it simply retries.
+//! scheduler tick, and `scripts/verify-attestation.py` retries a `tls:`
+//! mismatch with a fresh token for exactly this reason.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
