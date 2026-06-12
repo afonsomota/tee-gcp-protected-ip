@@ -175,11 +175,29 @@ EmbeddingGemma instance (issue #11). If memory ever gets tight,
 `LLAMA_EXTRA_ARGS="--ctx-size 8192"` shaves ~0.7 GiB off the KV cache.
 
 Cold boot to `/health` ok: **5.6 s locally** (M-series laptop; model load
-dominates). On the CVM the number will be larger — the ~3.4 GB image pull
-dominates — and is logged as `inference: llama-server ready in Ns`.
+dominates). On the CVM the launcher's own number is about the same —
+**2.8–2.9 s** (`inference: llama-server ready in Ns`) — because the GGUF is
+mmapped from local disk. What the user actually waits for is everything
+before it.
 
-TODO(on-VM numbers): capture the on-CVM cold-boot time and memory headroom
-from Cloud Logging on the next paid deploy and record them here.
+On-VM numbers, measured 2026-06-12 against `tees-499001` (production
+`confidential-space` image, `n2d-standard-4`, weights baked into a ~3.4 GB
+image, two consecutive boots within a couple of seconds of each other):
+
+| Phase (from Cloud Logging) | Duration |
+|---|---|
+| Instance create → guest `Boot completed` | ~42–45 s |
+| Image pull from same-region Artifact Registry | ~87–90 s |
+| Workload setup + launcher start | ~4 s |
+| llama-server boot → `/health` ok | **2.8–2.9 s** |
+| **Instance create → encrypted `/chat` ready** | **≈ 2 min 20 s – 2 min 40 s** |
+
+Memory, per llama.cpp's on-VM fit (`common_params_fit_impl`): **3532 MiB
+projected of 15024 MiB visible host memory** — ~11.2 GiB headroom for the
+EmbeddingGemma instance (issue #11), with the full 128k context retained
+(4 slots, unified KV). The image pull dominates cold boot, so shrinking the
+image (or fetching weights at boot, issue #7) is the lever if redeploy
+latency ever matters.
 
 ## Live run
 
