@@ -73,7 +73,7 @@ file, phase 2 moves the state into the bucket it just created:
 
 ```sh
 # Phase 1: apply against local state (the GCS bucket doesn't exist yet)
-echo 'terraform { backend "local" {} }' > infra/bootstrap/backend_override.tf
+printf 'terraform {\n  backend "local" {}\n}\n' > infra/bootstrap/backend_override.tf
 terraform -chdir=infra/bootstrap init
 terraform -chdir=infra/bootstrap apply -var project_id=YOUR_PROJECT_ID -var region=europe-west4
 
