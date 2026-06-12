@@ -33,8 +33,6 @@ variable "repository_id" {
 }
 
 variable "machine_type" {
-  # 16 GB: Gemma E2B (Q4) chat model + the EmbeddingGemma instance coming in
-  # issue 011 + launcher, with headroom (memory-fit spike, issue 006).
   description = "Confidential VM machine type (N2D for SEV-SNP)"
   type        = string
   default     = "n2d-standard-4"
