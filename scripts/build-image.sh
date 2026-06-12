@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Canonical, deterministic launcher image build (spikes 001+002, issues 012/029).
+# Canonical, deterministic launcher image build (spikes 001+002, issues #12/#29).
 #
 # This script IS the release recipe and the verify-it-yourself instructions:
 # run it from the tagged source and the resulting manifest digest must equal

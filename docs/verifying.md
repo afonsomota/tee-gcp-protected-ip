@@ -149,6 +149,12 @@ trust-neutral — both yield the same bytes or fail loudly:
 LLAMA_BASE_SOURCE=REGION-docker.pkg.dev/PROJECT/tee-example/llama.cpp make image
 ```
 
+(If you load the rebuilt image into Docker and run it locally to poke at
+`/echo`, `docker ps` will report the container `unhealthy`: the llama.cpp
+base image carries a `HEALTHCHECK` that probes `llama-server`, which never
+starts in a weightless release build — `/chat` serves 503. The status is
+expected and cosmetic; Confidential Space ignores Docker healthchecks.)
+
 **Proven:** the digest is a pure function of the public source at that
 commit plus one pinned public artifact. No build service, registry,
 operator, or CI is trusted — if any of them had tampered with the image,
