@@ -141,10 +141,11 @@ supervises a `llama-server` binary (default `/app/llama-server`) and needs
 model weights. An image built by the recipe above — exactly one layer,
 exactly the launcher binary — boots, but `/chat` serves 503 permanently.
 
-Direction (recommended in the issue 006 review, to be settled in issue 012):
-extend the deterministic layer with a **digest-pinned `llama-server`
-binary**, and deliver weights at boot via issue 007's attestation-gated
-KMS/GCS path instead of baking ~3.4 GB into the reproducible image. That
-keeps the image small and the rebuild-it-yourself story cheap; the weights'
-integrity is covered by the KMS policy rather than the image digest.
-Extending the recipe is an explicit task on issue 012.
+**Resolved in spike 002** (`002-llama-server-in-release-image.md`,
+2026-06-12): the release image becomes the digest-pinned official llama.cpp
+server image as base plus the reproducible launcher layer appended with
+pinned crane — D stays verifier-recomputable; weights are never baked
+(delivered at boot via issue 007; until then release builds serve 503 on
+`/chat`). An earlier recommendation recorded here — building `llama-server`
+into the deterministic layer itself — was considered and shelved as future
+hardening; spike 002 has the reasoning.

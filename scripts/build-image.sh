@@ -94,6 +94,7 @@ docker run --rm --platform linux/amd64 \
     mkdir /build
     cp /src/Cargo.toml /src/Cargo.lock /build/
     cp -R /src/src /build/src
+    cp -R /src/prompts /build/prompts
     cd /build
     # CARGO_JOBS limits build parallelism only (helps memory-constrained or
     # emulated hosts); it has no effect on the produced bytes.
