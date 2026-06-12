@@ -31,3 +31,6 @@ __pycache__/
 *.tfstate
 *.tfstate.backup
 *.tfvars
+# Local-backend override used only for phase 1 of a fresh-project bootstrap
+# (see infra/README.md "Remote state")
+*_override.tf

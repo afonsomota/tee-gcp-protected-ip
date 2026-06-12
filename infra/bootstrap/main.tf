@@ -1,11 +1,21 @@
-# One-time project setup: required APIs, Artifact Registry repo, and the
-# static CVM IP (issue 004), which must survive per-deployment destroy/apply
-# of the main root so DNS stays valid.
-# Apply once per project, before the main infra root:
-#   terraform -chdir=infra/bootstrap init && terraform -chdir=infra/bootstrap apply
+# One-time project setup: required APIs + Artifact Registry repo + static IP
+# + the GCS bucket holding Terraform state for both roots. Apply once per
+# project, before the main infra root — see infra/README.md ("Remote state")
+# for the init flags and the two-phase bootstrap on a fresh project (the
+# state bucket is created by this root, so the very first apply must run
+# against local state).
 
 terraform {
   required_version = ">= 1.5"
+
+  # Partial configuration: the bucket name embeds the project ID, which this
+  # public repo never commits (and backend blocks can't read variables).
+  # Supply it at init:
+  #   terraform -chdir=infra/bootstrap init \
+  #     -backend-config="bucket=${PROJECT_ID}-tfstate" \
+  #     -backend-config="prefix=bootstrap"
+  backend "gcs" {}
+
   required_providers {
     google = {
       source  = "hashicorp/google"
@@ -43,6 +53,41 @@ resource "google_project_service" "apis" {
   ])
   service            = each.value
   disable_on_destroy = false
+}
+
+# Terraform state for both roots, prefixes "bootstrap" and "cvm". Lives in
+# this never-destroyed root; the self-reference (the bucket holds its own
+# root's state) is accepted because bootstrap never runs destroy — and
+# prevent_destroy + force_destroy=false make that mechanical. State can
+# contain secrets, hence public access prevention; versioning gives recovery
+# from a corrupted or mistakenly-pushed state.
+resource "google_storage_bucket" "tfstate" {
+  name     = "${var.project_id}-tfstate"
+  location = var.region
+
+  force_destroy               = false
+  public_access_prevention    = "enforced"
+  uniform_bucket_level_access = true
+
+  versioning {
+    enabled = true
+  }
+
+  # Prune noncurrent state versions after 30 days, but always keep the
+  # newest 5 regardless of age (conditions AND together).
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      days_since_noncurrent_time = 30
+      num_newer_versions         = 5
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_artifact_registry_repository" "tee_example" {

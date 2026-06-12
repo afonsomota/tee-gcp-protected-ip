@@ -8,7 +8,7 @@ Two Terraform roots:
 
 | Root | Purpose | Lifecycle |
 |---|---|---|
-| `infra/bootstrap/` | Required APIs + Artifact Registry repo + static external IP | Apply **once** per project, never destroy |
+| `infra/bootstrap/` | Required APIs + Artifact Registry repo + static external IP + Terraform state bucket | Apply **once** per project, never destroy |
 | `infra/` | Service account, firewall, the CVM itself | Apply/destroy per deployment |
 
 The static IP lives in bootstrap so the CVM comes back on the **same address**
@@ -16,6 +16,45 @@ after every destroy/apply cycle — DNS pointed at it never goes stale. The main
 root finds it by name (`data "google_compute_address"`), so neither root reads
 the other's Terraform state. A reserved regional IP is free while attached to
 a running instance and accrues a small idle charge while the CVM is destroyed.
+
+## Remote state
+
+Both roots keep their Terraform state in one GCS bucket,
+`gs://YOUR_PROJECT_ID-tfstate`, under the prefixes `bootstrap` and `cvm`
+(workspaces for [per-branch dev deployments](#per-branch-dev-deployments) land
+at `cvm/<workspace>.tfstate`, prod in `cvm/default.tfstate`). The bucket is
+itself Terraform-managed in the bootstrap root — versioned, public access
+prevention enforced, uniform bucket-level access, `prevent_destroy` — which is
+safe because bootstrap never runs destroy.
+
+The repo is public and never commits the project ID, and backend blocks can't
+read variables, so both roots use **partial backend configuration**: the
+committed blocks are empty `backend "gcs" {}` and the bucket name arrives at
+init time —
+
+```sh
+terraform -chdir=infra/bootstrap init \
+  -backend-config="bucket=YOUR_PROJECT_ID-tfstate" -backend-config="prefix=bootstrap"
+terraform -chdir=infra init \
+  -backend-config="bucket=YOUR_PROJECT_ID-tfstate" -backend-config="prefix=cvm"
+```
+
+(`make deploy` / `make dev-deploy` pass these flags for you, derived from
+`PROJECT_ID`.)
+
+**Migrating an existing local state** (a checkout that applied either root
+before the backend existed): run the init above with `-migrate-state` added;
+Terraform copies the local state — including any `terraform.tfstate.d/`
+workspaces in `infra/` — into the bucket. Confirm with
+`terraform state list`, then delete the leftover local
+`terraform.tfstate*` files.
+
+**Closing the project down for good** is not a Terraform operation — the
+state bucket refuses to destroy itself by design. Delete the GCP project:
+
+```sh
+gcloud projects delete YOUR_PROJECT_ID
+```
 
 ## One-time GCP project setup
 
@@ -27,23 +66,43 @@ gcloud auth application-default login  # ADC, used by Terraform
 gcloud config set project YOUR_PROJECT_ID
 ```
 
-Then either apply the bootstrap root:
+Then apply the bootstrap root. On a **fresh project** this is two-phase,
+because the bucket that will hold bootstrap's own state is created by this
+very apply — phase 1 runs against a local backend via a gitignored override
+file, phase 2 moves the state into the bucket it just created:
 
 ```sh
+# Phase 1: apply against local state (the GCS bucket doesn't exist yet)
+printf 'terraform {\n  backend "local" {}\n}\n' > infra/bootstrap/backend_override.tf
 terraform -chdir=infra/bootstrap init
 terraform -chdir=infra/bootstrap apply -var project_id=YOUR_PROJECT_ID -var region=europe-west4
+
+# Phase 2: migrate the state into the bucket phase 1 created
+rm infra/bootstrap/backend_override.tf
+terraform -chdir=infra/bootstrap init -migrate-state \
+  -backend-config="bucket=YOUR_PROJECT_ID-tfstate" -backend-config="prefix=bootstrap"
+rm infra/bootstrap/terraform.tfstate*    # local copies, now redundant
 ```
 
-…or run the equivalent gcloud one-liners:
+(The same two-phase flow migrates a checkout bootstrapped before remote state
+existed: phase 1's apply adds the bucket to the existing local state, phase 2
+moves that state in.)
+
+Instead of Terraform you can run the equivalent gcloud one-liners — plus the
+state bucket, which the `infra/` root still needs:
 
 ```sh
-gcloud services enable compute.googleapis.com confidentialcomputing.googleapis.com artifactregistry.googleapis.com
+gcloud services enable compute.googleapis.com confidentialcomputing.googleapis.com artifactregistry.googleapis.com iamcredentials.googleapis.com
 gcloud artifacts repositories create tee-example --repository-format=docker --location=europe-west4
 gcloud compute addresses create tee-example-cvm --region=europe-west4
+gcloud storage buckets create gs://YOUR_PROJECT_ID-tfstate --location=europe-west4 \
+  --uniform-bucket-level-access --public-access-prevention
+gcloud storage buckets update gs://YOUR_PROJECT_ID-tfstate --versioning
 ```
 
-Already bootstrapped before the static IP existed? Re-run the bootstrap
-apply — it only adds the new resources; existing ones are untouched.
+Already bootstrapped on an older revision? Re-run the bootstrap apply — it
+only adds what's missing (the address, the bucket); existing resources are
+untouched.
 
 ### DNS for the enclave API
 
@@ -74,7 +133,11 @@ in `infra/`.
 
 ```sh
 gcloud auth configure-docker europe-west4-docker.pkg.dev
+# MODEL_URL bakes chat-model weights (GGUF) into the image so /chat serves
+# real inference (issue 006; encrypted delivery replaces this in issue 007).
+# Without it the image still works, but /chat returns 503.
 docker buildx build --platform linux/amd64 \
+  --build-arg MODEL_URL="https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf" \
   -t europe-west4-docker.pkg.dev/YOUR_PROJECT_ID/tee-example/launcher:latest \
   --push launcher/
 # Grab the digest the CVM will be measured against:
@@ -86,7 +149,8 @@ docker buildx imagetools inspect \
 ## Deploy, verify, destroy
 
 ```sh
-terraform -chdir=infra init
+terraform -chdir=infra init \
+  -backend-config="bucket=YOUR_PROJECT_ID-tfstate" -backend-config="prefix=cvm"
 # Persist the deployment vars in a tfvars file (gitignored). Terraform
 # auto-loads it, so the destroy at the end needs no vars re-supplied.
 cat > infra/terraform.tfvars <<EOF
@@ -96,7 +160,8 @@ EOF
 terraform -chdir=infra apply
 
 IP=$(terraform -chdir=infra output -raw external_ip)
-# Boot takes a couple of minutes (image pull + container start).
+# Boot takes several minutes (image pull — ~3.4 GB with baked weights — then
+# model load; the launcher logs "llama-server ready in Ns" when /chat works).
 curl "http://$IP:8080/echo?msg=hello"
 # …or, once the A record is in place:
 curl "http://api.YOUR_DOMAIN:8080/echo?msg=hello"
@@ -113,6 +178,21 @@ The verifier generates a fresh random nonce, fetches the token from
 `/attestation`, validates Google's signature against the Confidential Space
 JWKS, and checks issuer, audience, `eat_nonce`, and
 `submods.container.image_digest`, printing PASS/FAIL per check.
+
+To exercise `/chat` on a deployed enclave without the browser, use
+`scripts/chat-client.py` — it speaks the frontend's HPKE wire format
+(fetch `/hpke-key`, seal the message, open the sealed reply):
+
+```sh
+./scripts/chat-client.py --url "http://$IP:8080" "how was my week?"  # one shot
+./scripts/chat-client.py --url "http://$IP:8080"                     # interactive
+```
+
+In interactive mode the script keeps the conversation history locally and
+resends it in full on every turn — the enclave holds no conversation state.
+
+Unlike the frontend, the script does not verify the attestation token before
+trusting the enclave key — pair it with `verify-attestation.py`.
 
 Debugging tips: set `-var confidential_space_image_family=confidential-space-debug`
 to get an SSH-able debug image, and check serial port 1 / Cloud Logging for
@@ -166,6 +246,90 @@ Notes:
   SHA-256 of the serving certificate key's SubjectPublicKeyInfo DER; compare
   with `openssl s_client -connect api.YOUR_DOMAIN:443 | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | sha256sum`.
 
+## Inference footprint & boot time
+
+Measured for issue #6 with Gemma 4 E2B QAT Q4 (`gemma-4-E2B_q4_0-it.gguf`)
+under the supervised launcher, per llama.cpp's own memory accounting:
+
+| What | Size |
+|---|---|
+| Model weights | ~3.2 GiB |
+| KV cache (default 128k context) | ~0.8 GiB |
+| Compute buffer | ~0.5 GiB |
+| Launcher | ~5 MiB |
+| **Total** | **≈ 4.5 GiB** |
+
+On the default `n2d-standard-4` (16 GB) that leaves >10 GiB headroom for the
+EmbeddingGemma instance (issue #11). If memory ever gets tight,
+`LLAMA_EXTRA_ARGS="--ctx-size 8192"` shaves ~0.7 GiB off the KV cache.
+
+Cold boot to `/health` ok: **5.6 s locally** (M-series laptop; model load
+dominates). On the CVM the launcher's own number is about the same —
+**2.8–2.9 s** (`inference: llama-server ready in Ns`) — because the GGUF is
+mmapped from local disk. What the user actually waits for is everything
+before it.
+
+On-VM numbers, measured 2026-06-12 against `tees-499001` (production
+`confidential-space` image, `n2d-standard-4`, weights baked into a ~3.4 GB
+image, two consecutive boots within a couple of seconds of each other):
+
+| Phase (from Cloud Logging) | Duration |
+|---|---|
+| Instance create → guest `Boot completed` | ~42–45 s |
+| Image pull from same-region Artifact Registry | ~87–90 s |
+| Workload setup + launcher start | ~4 s |
+| llama-server boot → `/health` ok | **2.8–2.9 s** |
+| **Instance create → encrypted `/chat` ready** | **≈ 2 min 20 s – 2 min 40 s** |
+
+Memory, per llama.cpp's on-VM fit (`common_params_fit_impl`): **3532 MiB
+projected of 15024 MiB visible host memory** — ~11.2 GiB headroom for the
+EmbeddingGemma instance (issue #11), with the full 128k context retained
+(4 slots, unified KV). The image pull dominates cold boot, so shrinking the
+image (or fetching weights at boot, issue #7) is the lever if redeploy
+latency ever matters.
+
+## Per-branch dev deployments
+
+A feature branch can be deployed to its own CVM alongside prod (issue #28),
+e.g. for on-VM measurements, without touching the production deployment:
+
+```sh
+make dev-deploy PROJECT_ID=YOUR_PROJECT_ID    # from the feature branch
+make dev-destroy PROJECT_ID=YOUR_PROJECT_ID   # tear down this branch's CVM only
+make dev-list                                 # what's (potentially) still up
+```
+
+`dev-deploy` derives a deployment suffix from the branch name
+(`scripts/dev-slug.sh` → `dev-<slug>`, sanitized and truncated so the
+service-account `account_id` stays within GCP's 30-char limit), buildx-pushes
+the launcher image tagged `dev-<slug>` (non-reproducible digest — dev only;
+releases still come from `make image`), and applies the main root with
+`-var deployment_suffix=dev-<slug>` in a **Terraform workspace** of the same
+name. Prod lives in the `default` workspace with an empty suffix, so its
+state and resource names are untouched, and a dev `destroy` can only ever
+see its own workspace's resources: `tee-example-cvm-dev-<slug>`, service
+account `tee-ex-dev-<slug>`, firewall `tee-example-allow-http-dev-<slug>`.
+
+Dev CVMs take an **ephemeral external IP** — `dev-deploy` prints it, along
+with a ready-made `verify-attestation.py` line. The bootstrap static IP (and
+the DNS pointing at it) belongs to prod alone. To point the frontend at a
+dev enclave, drop the printed address into `frontend/.env.local`:
+
+```sh
+VITE_API_ENDPOINT=http://DEV_IP:8080
+```
+
+**Cost**: every dev deployment is a full SEV-SNP N2D instance billed while
+it runs. Tear yours down when done; `make dev-list` shows leftover
+workspaces, and dev instances carry labels for sweeping by hand:
+
+```sh
+gcloud compute instances list --filter=labels.created-by=dev-deploy
+```
+
+Running several deployments at once also eats into the regional N2D vCPU
+quota (`europe-west4`) — check it before assuming many can coexist.
+
 ## Live run
 
 Completed 2026-06-10 against project `tees-499001`: `/echo` responded and the
@@ -201,7 +365,10 @@ gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
 
 # 2. One-time project setup: enable APIs + create the Artifact Registry repo
-terraform -chdir=infra/bootstrap init
+#    and the state bucket. Fresh project? Use the two-phase flow from
+#    "One-time GCP project setup" above instead of these two lines.
+terraform -chdir=infra/bootstrap init \
+  -backend-config="bucket=YOUR_PROJECT_ID-tfstate" -backend-config="prefix=bootstrap"
 terraform -chdir=infra/bootstrap apply -var project_id=YOUR_PROJECT_ID
 
 # 3. Build & push the workload image, capture its digest
@@ -215,7 +382,8 @@ DIGEST=$(docker buildx imagetools inspect \
 
 # 4. Bring up the Confidential Space CVM. The vars are persisted in a
 #    gitignored tfvars file so step 7's destroy needs none of them.
-terraform -chdir=infra init
+terraform -chdir=infra init \
+  -backend-config="bucket=YOUR_PROJECT_ID-tfstate" -backend-config="prefix=cvm"
 cat > infra/terraform.tfvars <<EOF
 project_id   = "YOUR_PROJECT_ID"
 image_digest = "$DIGEST"
