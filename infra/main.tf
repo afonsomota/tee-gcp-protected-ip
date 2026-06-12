@@ -3,6 +3,17 @@
 
 terraform {
   required_version = ">= 1.5"
+
+  # Partial configuration — bucket name embeds the never-committed project
+  # ID; supply it at init (or use make deploy / make dev-deploy):
+  #   terraform -chdir=infra init \
+  #     -backend-config="bucket=${PROJECT_ID}-tfstate" \
+  #     -backend-config="prefix=cvm"
+  # The bucket is created by infra/bootstrap. Workspaces (per-branch dev
+  # deployments) map to objects under the prefix: cvm/<workspace>.tfstate,
+  # with prod in cvm/default.tfstate.
+  backend "gcs" {}
+
   required_providers {
     google = {
       source  = "hashicorp/google"
