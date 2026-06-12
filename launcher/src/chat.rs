@@ -36,8 +36,8 @@ pub const REQUEST_INFO: &[u8] = b"tee-example/hpke/chat/request/v1";
 pub const RESPONSE_INFO: &[u8] = b"tee-example/hpke/chat/response/v1";
 
 /// Fixed for this slice; the harness (issue 008) takes over prompting.
-const SYSTEM_PROMPT: &str = "You are a private journaling assistant running \
-inside a confidential computing enclave. Be helpful and concise.";
+/// Edit `launcher/prompts/system.txt` to change it (embedded at compile time).
+const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt").trim_ascii();
 
 /// CPU inference is slow; give a long-prompt completion room to finish.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
