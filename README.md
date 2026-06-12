@@ -39,6 +39,7 @@ what each step proves.
 | [docs/verifying.md](docs/verifying.md) | verify it yourself, step by step — what each step proves and what's still assumed |
 | [docs/DESIGN.md](docs/DESIGN.md) | the original design document: every major decision and its rationale |
 | [docs/spikes/001-deterministic-oci-digest.md](docs/spikes/001-deterministic-oci-digest.md) | why reproducible builds are the trust anchor (and what was rejected) |
+| [docs/spikes/002-llama-server-in-release-image.md](docs/spikes/002-llama-server-in-release-image.md) | how `llama-server` enters the release image without breaking the verifiable digest |
 | [infra/README.md](infra/README.md) | deploy runbook (Terraform, two roots) |
 | [frontend/README.md](frontend/README.md) | run the frontend locally; the trust-on-first-use caveat |
 
@@ -66,8 +67,10 @@ public source @ tag  →  pinned recipe  →  image digest D  →  attestation c
 The released image is produced by a short, fully pinned recipe
 (`scripts/build-image.sh`, invoked as `make image`): a static musl binary
 built in a digest-pinned Rust container at a fixed path, packed as a
-metadata-stripped USTAR tar, assembled onto an empty base with a
-version-pinned `crane`. Every pinned input is recorded in the release notes
+metadata-stripped USTAR tar, appended with a version-pinned `crane` onto the
+digest-pinned official llama.cpp server image (which provides the
+`llama-server` binary the launcher supervises — spike 002). Every pinned
+input, base-image digest included, is recorded in the release notes
 (`release-pins.txt`). The dev `launcher/Dockerfile` is non-canonical; its
 digests will not match a release.
 
@@ -97,6 +100,15 @@ image with the toolchain baked in.
 - **You rebuild (zero trust).** D is re-derivable from the tagged source on
   your own machine. A compromised CI or operator would publish a digest that
   your rebuild fails to reproduce — caught by any single independent rebuild.
+  One honest asterisk: the *launcher layer* is re-derived from the Rust
+  source in this repo, but the base image's bytes (`llama-server` and its
+  userland) are upstream ggml-org's public content-addressed artifact at a
+  pinned digest — the same image everyone pulls, impossible for the operator
+  to substitute without changing D, but not re-derived from llama.cpp's C++
+  source. A backdoor there would have to live in the public artifact used by
+  everyone, not in something targeted at this deployment. Building
+  llama-server reproducibly from source is recorded as future hardening
+  (`docs/spikes/002-llama-server-in-release-image.md`).
 - **You don't rebuild (detection, not prevention).** The release workflow
   (`.github/workflows/release.yml`) builds D and independently re-derives it
   on a separate runner; any mismatch blocks the release. But both the
