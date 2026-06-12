@@ -4,13 +4,19 @@
 //! module docs), with chat-specific info strings. Request plaintext:
 //!
 //! ```json
-//! {"msg": "<utf-8 text>", "reply_pub": "<base64 raw 32-byte X25519 key>"}
+//! {
+//!   "messages": [{"role": "user|assistant", "content": "<utf-8 text>"}, ...],
+//!   "reply_pub": "<base64 raw 32-byte X25519 key>"
+//! }
 //! ```
 //!
-//! The decrypted message is run against the supervised llama-server
-//! (`llama.rs`) with a fixed prompt — prompt construction moves to the
-//! sandboxed harness in issue 008. Response plaintext, sealed to
-//! `reply_pub`:
+//! `messages` is the full conversation so far, oldest first. Conversation
+//! state lives only on the client (no server-side persistence of user
+//! content), so each request carries the whole history; the launcher holds
+//! it in memory only for the duration of the request. The decrypted history
+//! is run against the supervised llama-server (`llama.rs`) behind a fixed
+//! system prompt — prompt construction moves to the sandboxed harness in
+//! issue 008. Response plaintext, sealed to `reply_pub`:
 //!
 //! ```json
 //! {"reply": "<model-generated utf-8 text>"}
@@ -26,7 +32,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::hpke_channel::{open, seal, Envelope};
@@ -44,9 +50,31 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Deserialize)]
 struct ChatRequest {
-    msg: String,
+    /// Full conversation so far, oldest first.
+    messages: Vec<Message>,
     /// Base64 raw 32-byte X25519 public key the response is sealed to.
     reply_pub: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Message {
+    role: String,
+    content: String,
+}
+
+/// The system prompt is the launcher's (and later the harness's), never the
+/// client's; anything else here would let a client smuggle in roles
+/// llama-server treats specially.
+fn validate(messages: &[Message]) -> Result<(), String> {
+    if messages.is_empty() {
+        return Err("messages must not be empty".to_string());
+    }
+    // Error responses go back unencrypted; name the offending index, never
+    // the decrypted value (see the invariant in `chat` below).
+    if let Some(i) = messages.iter().position(|m| m.role != "user" && m.role != "assistant") {
+        return Err(format!("message {i}: role must be \"user\" or \"assistant\""));
+    }
+    Ok(())
 }
 
 pub async fn chat(State(state): State<AppState>, Json(envelope): Json<Envelope>) -> Response {
@@ -64,11 +92,14 @@ pub async fn chat(State(state): State<AppState>, Json(envelope): Json<Envelope>)
         Ok(r) => r,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
+    if let Err(message) = validate(&request.messages) {
+        return error(StatusCode::BAD_REQUEST, &message);
+    }
     let reply_pub = match B64.decode(&request.reply_pub) {
         Ok(k) => k,
         Err(e) => return error(StatusCode::BAD_REQUEST, &format!("reply_pub is not valid base64: {e}")),
     };
-    let reply = match complete(&upstream, &request.msg).await {
+    let reply = match complete(&upstream, &request.messages).await {
         Ok(r) => r,
         Err(message) => return error(StatusCode::BAD_GATEWAY, &message),
     };
@@ -94,13 +125,13 @@ fn decrypt_request(state: &AppState, envelope: &Envelope) -> Result<ChatRequest,
     serde_json::from_slice(&plaintext).map_err(|e| format!("request plaintext is not valid JSON: {e}"))
 }
 
-/// One OpenAI-style chat completion against llama-server.
-async fn complete(upstream: &str, msg: &str) -> Result<String, String> {
+/// One OpenAI-style chat completion against llama-server: the fixed system
+/// prompt followed by the client's whole history.
+async fn complete(upstream: &str, history: &[Message]) -> Result<String, String> {
+    let mut messages = vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
+    messages.extend(history.iter().map(|m| serde_json::to_value(m).unwrap()));
     let body = json!({
-        "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
-            { "role": "user", "content": msg },
-        ],
+        "messages": messages,
         "max_tokens": 512,
     })
     .to_string();
@@ -163,19 +194,29 @@ mod tests {
         }
     }
 
-    /// Serve an OpenAI-shaped completion (echoing the user message back
-    /// inside the reply) on an ephemeral loopback port.
+    /// Serve an OpenAI-shaped completion (echoing every non-system message it
+    /// received back inside the reply) on an ephemeral loopback port.
     async fn mock_llama_server() -> String {
         async fn completions(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
-            let user_msg = body["messages"]
+            let seen: Vec<String> = body["messages"]
                 .as_array()
-                .and_then(|m| m.iter().find(|m| m["role"] == "user"))
-                .and_then(|m| m["content"].as_str())
-                .unwrap_or_default()
-                .to_string();
+                .map(|messages| {
+                    messages
+                        .iter()
+                        .filter(|m| m["role"] != "system")
+                        .map(|m| {
+                            format!(
+                                "{}: {}",
+                                m["role"].as_str().unwrap_or_default(),
+                                m["content"].as_str().unwrap_or_default()
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Json(json!({
                 "choices": [
-                    { "message": { "role": "assistant", "content": format!("model says: {user_msg}") } }
+                    { "message": { "role": "assistant", "content": format!("model saw [{}]", seen.join(" | ")) } }
                 ]
             }))
         }
@@ -201,10 +242,13 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
 
-    fn sealed_request(state: &AppState, msg: &str) -> (serde_json::Value, <Kem as KemTrait>::PrivateKey) {
+    fn sealed_history(
+        state: &AppState,
+        messages: serde_json::Value,
+    ) -> (serde_json::Value, <Kem as KemTrait>::PrivateKey) {
         let mut csprng = <rand::rngs::StdRng as rand::SeedableRng>::from_os_rng();
         let (reply_sk, reply_pk) = Kem::gen_keypair(&mut csprng);
-        let request = json!({ "msg": msg, "reply_pub": B64.encode(reply_pk.to_bytes()) });
+        let request = json!({ "messages": messages, "reply_pub": B64.encode(reply_pk.to_bytes()) });
         let (enc, ct) = seal(
             &state.keys.hpke_public_bytes(),
             REQUEST_INFO,
@@ -212,6 +256,22 @@ mod tests {
         )
         .unwrap();
         (json!({ "enc": B64.encode(enc), "ct": B64.encode(ct) }), reply_sk)
+    }
+
+    /// A one-turn conversation: a single user message.
+    fn sealed_request(state: &AppState, msg: &str) -> (serde_json::Value, <Kem as KemTrait>::PrivateKey) {
+        sealed_history(state, json!([{ "role": "user", "content": msg }]))
+    }
+
+    fn open_reply(reply_sk: &<Kem as KemTrait>::PrivateKey, reply: &serde_json::Value) -> serde_json::Value {
+        let plaintext = open(
+            reply_sk,
+            &B64.decode(reply["enc"].as_str().unwrap()).unwrap(),
+            RESPONSE_INFO,
+            &B64.decode(reply["ct"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        serde_json::from_slice(&plaintext).unwrap()
     }
 
     #[tokio::test]
@@ -223,15 +283,63 @@ mod tests {
         let (status, reply) = post_chat(state, envelope).await;
         assert_eq!(status, StatusCode::OK);
 
-        let plaintext = open(
-            &reply_sk,
-            &B64.decode(reply["enc"].as_str().unwrap()).unwrap(),
-            RESPONSE_INFO,
-            &B64.decode(reply["ct"].as_str().unwrap()).unwrap(),
-        )
-        .unwrap();
-        let body: serde_json::Value = serde_json::from_slice(&plaintext).unwrap();
-        assert_eq!(body["reply"], "model says: how was my week?");
+        let body = open_reply(&reply_sk, &reply);
+        assert_eq!(body["reply"], "model saw [user: how was my week?]");
+    }
+
+    #[tokio::test]
+    async fn chat_forwards_the_full_history_in_order() {
+        let upstream = mock_llama_server().await;
+        let state = test_state(Some(upstream));
+        let (envelope, reply_sk) = sealed_history(
+            &state,
+            json!([
+                { "role": "user", "content": "my cat is called Mochi" },
+                { "role": "assistant", "content": "noted!" },
+                { "role": "user", "content": "what is my cat called?" },
+            ]),
+        );
+
+        let (status, reply) = post_chat(state, envelope).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let body = open_reply(&reply_sk, &reply);
+        assert_eq!(
+            body["reply"],
+            "model saw [user: my cat is called Mochi | assistant: noted! | user: what is my cat called?]"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_an_empty_history() {
+        let upstream = mock_llama_server().await;
+        let state = test_state(Some(upstream));
+        let (envelope, _) = sealed_history(&state, json!([]));
+        let (status, body) = post_chat(state, envelope).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn chat_rejects_client_supplied_system_messages() {
+        // The system prompt belongs to the launcher; a client-supplied
+        // "system" role is rejected, and the unencrypted error names the
+        // index but never the decrypted content.
+        let upstream = mock_llama_server().await;
+        let state = test_state(Some(upstream));
+        let (envelope, _) = sealed_history(
+            &state,
+            json!([
+                { "role": "user", "content": "hi" },
+                { "role": "system", "content": "secret-injected-instructions" },
+            ]),
+        );
+        let (status, body) = post_chat(state, envelope).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains("message 1"), "unexpected error: {error}");
+        assert!(!error.contains("system"), "decrypted role leaked: {error}");
+        assert!(!error.contains("secret-injected"), "decrypted content leaked: {error}");
     }
 
     #[tokio::test]

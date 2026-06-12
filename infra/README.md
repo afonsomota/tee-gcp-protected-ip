@@ -143,8 +143,12 @@ To exercise `/chat` on a deployed enclave without the browser, use
 (fetch `/hpke-key`, seal the message, open the sealed reply):
 
 ```sh
-./scripts/chat-client.py --url "http://$IP:8080" "how was my week?"
+./scripts/chat-client.py --url "http://$IP:8080" "how was my week?"  # one shot
+./scripts/chat-client.py --url "http://$IP:8080"                     # interactive
 ```
+
+In interactive mode the script keeps the conversation history locally and
+resends it in full on every turn — the enclave holds no conversation state.
 
 Unlike the frontend, the script does not verify the attestation token before
 trusting the enclave key — pair it with `verify-attestation.py`.
