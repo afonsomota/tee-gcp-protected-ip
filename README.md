@@ -123,3 +123,7 @@ make verify IMAGE_DIGEST=sha256:...                  # live token must bind to D
 (Terraform). Once attestation-gated KMS lands (issues 004/007), the same
 apply rotates the attestation policy to admit only the new digest — old
 images lose access to sealed material.
+
+For testing a feature branch on a real CVM without touching prod, use
+`make dev-deploy` / `make dev-destroy` (per-branch dev deployments,
+ephemeral IP, buildx image) — see `infra/README.md`.
