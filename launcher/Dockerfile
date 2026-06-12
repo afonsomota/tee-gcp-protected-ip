@@ -16,6 +16,7 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
     && cargo build --release --target x86_64-unknown-linux-musl \
     && rm -rf src
 COPY src ./src
+COPY prompts ./prompts
 RUN touch src/main.rs && cargo build --release --target x86_64-unknown-linux-musl
 
 # Optionally bake chat-model weights into the image (issue 006 allows
