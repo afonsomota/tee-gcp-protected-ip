@@ -11,14 +11,6 @@
 # the tagged source fails to re-derive. The cross-rebuild job continuously
 # proves the recipe stays reproducible; outside rebuilds provide detection.
 #
-# Runner image: `ubuntu-latest` is deliberately left floating (issue #24).
-# The runner image is not a build input — the build runs inside a
-# sha256-pinned container (scripts/build-image.sh), so the host image
-# cannot influence D. If that ever broke, the two-runner reproducibility
-# gate and outside rebuilds would surface it as a digest mismatch, not
-# silent drift. Pinning (e.g. ubuntu-24.04) would only add a false sense
-# of determinism while costing us runner-image security updates.
-#
 # Optional repo configuration for the registry push + image attestation
 # (Settings -> Secrets and variables -> Actions -> Variables). If unset,
 # those steps are skipped and the release carries only D + the OCI tarball:
