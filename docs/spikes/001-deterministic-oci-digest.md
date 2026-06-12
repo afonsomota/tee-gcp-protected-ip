@@ -131,3 +131,20 @@ no wall-clock leakage into the digest.
    image is produced solely by the recipe above.
 
 Implementation: issue 012 (reproducible release pipeline).
+
+---
+
+## Addendum (2026-06-12, issue 006): the recipe no longer matches the runtime
+
+Chat inference (issue 006) changed what the launcher needs at runtime: it
+supervises a `llama-server` binary (default `/app/llama-server`) and needs
+model weights. An image built by the recipe above — exactly one layer,
+exactly the launcher binary — boots, but `/chat` serves 503 permanently.
+
+Direction (recommended in the issue 006 review, to be settled in issue 012):
+extend the deterministic layer with a **digest-pinned `llama-server`
+binary**, and deliver weights at boot via issue 007's attestation-gated
+KMS/GCS path instead of baking ~3.4 GB into the reproducible image. That
+keeps the image small and the rebuild-it-yourself story cheap; the weights'
+integrity is covered by the KMS policy rather than the image digest.
+Extending the recipe is an explicit task on issue 012.

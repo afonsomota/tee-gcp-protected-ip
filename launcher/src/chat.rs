@@ -56,7 +56,10 @@ pub async fn chat(State(state): State<AppState>, Json(envelope): Json<Envelope>)
             "inference not configured: no model loaded in this launcher",
         );
     };
-    // Decrypt and validate before touching the model.
+    // Decrypt and validate before touching the model. Error strings up to
+    // and including decryption describe only attacker-supplied ciphertext
+    // (bad base64, bad envelope) — never decrypted content. Keep that
+    // invariant: client-visible errors must not carry plaintext fragments.
     let request = match decrypt_request(&state, &envelope) {
         Ok(r) => r,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
@@ -114,10 +117,16 @@ async fn complete(upstream: &str, msg: &str) -> Result<String, String> {
     .map_err(|_| format!("inference timed out after {UPSTREAM_TIMEOUT:?}"))?
     .map_err(|e| format!("inference upstream unreachable: {e}"))?;
     if !status.is_success() {
-        return Err(format!(
-            "inference upstream returned {status}: {}",
-            String::from_utf8_lossy(&response)
-        ));
+        // llama-server error bodies can echo prompt fragments (context
+        // overflow, template errors). Relaying the body would send user
+        // plaintext to the network; logging it would land it in Cloud
+        // Logging (log_redirect=always), readable by the operator. Status
+        // and length only, on both paths.
+        eprintln!(
+            "inference: upstream returned {status} ({}-byte body withheld)",
+            response.len()
+        );
+        return Err(format!("inference upstream returned {status}"));
     }
     let completion: serde_json::Value = serde_json::from_slice(&response)
         .map_err(|e| format!("inference upstream returned invalid JSON: {e}"))?;
@@ -246,6 +255,31 @@ mod tests {
         let (status, body) = post_chat(state, envelope).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert!(body["error"].as_str().unwrap().contains("unreachable"));
+    }
+
+    #[tokio::test]
+    async fn upstream_error_bodies_are_not_relayed_to_the_client() {
+        // llama-server error bodies can echo prompt fragments; the
+        // client-visible error must carry the status code only.
+        const SENTINEL: &str = "leaked-prompt-fragment";
+        async fn failing() -> (StatusCode, String) {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("context overflow while processing: {SENTINEL}"),
+            )
+        }
+        let app = Router::new().route("/v1/chat/completions", post(failing));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let state = test_state(Some(upstream));
+        let (envelope, _) = sealed_request(&state, "hello");
+        let (status, body) = post_chat(state, envelope).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains("returned 500"), "unexpected error: {error}");
+        assert!(!error.contains(SENTINEL), "upstream body leaked: {error}");
     }
 
     #[tokio::test]

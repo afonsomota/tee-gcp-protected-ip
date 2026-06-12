@@ -14,8 +14,17 @@
 //!   the official llama.cpp server image installs it).
 //! - `LLAMA_PORT` — loopback port (default 8081).
 //! - `LLAMA_EXTRA_ARGS` — whitespace-split extra args (context size, threads).
-//! - `LLAMA_UPSTREAM` — alternative for local dev: skip supervision entirely
-//!   and use an already-running llama-server at this `host:port`.
+//! - `LLAMA_UPSTREAM` — dev mode only (`--dev` / `LAUNCHER_DEV=1`): skip
+//!   supervision entirely and use an already-running llama-server at this
+//!   `host:port`.
+//!
+//! None of the `LLAMA_*` variables may ever be listed in the image's
+//! `tee.launch_policy.allow_env_override` label: an operator who could set
+//! them — `LLAMA_UPSTREAM` especially — could point decrypted user messages
+//! at an arbitrary address. Confidential Space rejects operator-supplied env
+//! vars unless that label allows them, so production is safe by default;
+//! the dev-mode gate below makes the bypass impossible even if the label
+//! were ever added.
 
 use std::time::Duration;
 
@@ -83,7 +92,7 @@ impl LlamaConfig {
 /// Resolve inference configuration from the environment. Returns the
 /// `host:port` of the llama-server the `/chat` endpoint should call, or
 /// `None` when inference is not configured (the endpoint then serves 503).
-pub fn init_from_env() -> Option<String> {
+pub fn init_from_env(dev: bool) -> Option<String> {
     // Empty counts as unset: the Dockerfile sets LLAMA_MODEL_PATH="" when no
     // weights are baked into the image.
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
@@ -93,7 +102,13 @@ pub fn init_from_env() -> Option<String> {
         supervise(config);
         Some(upstream)
     } else if let Some(upstream) = env("LLAMA_UPSTREAM") {
-        println!("inference: using external llama-server at {upstream} (unsupervised)");
+        // An external upstream receives decrypted user messages, so the
+        // audited TCB must never honor it in production (see module docs).
+        if !dev {
+            eprintln!("inference: LLAMA_UPSTREAM ignored outside dev mode; /chat will serve 503");
+            return None;
+        }
+        println!("inference: using external llama-server at {upstream} (unsupervised, dev only)");
         Some(upstream)
     } else {
         println!("inference: not configured (set LLAMA_MODEL_PATH or LLAMA_UPSTREAM); /chat will serve 503");

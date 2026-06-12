@@ -60,7 +60,7 @@ async fn main() {
     let state = AppState {
         keys: Arc::new(keys::EnclaveKeys::generate()),
         dev,
-        inference: llama::init_from_env(),
+        inference: llama::init_from_env(dev),
     };
     println!(
         "enclave key bindings: {} {}",

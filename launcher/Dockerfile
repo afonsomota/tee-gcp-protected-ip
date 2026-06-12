@@ -43,6 +43,9 @@ ENV LLAMA_ARG_HOST=127.0.0.1
 # Confidential Space launch policy: allow stdout/stderr redirection to Cloud
 # Logging on the production image (default is debug-only; without it stdout
 # is unavailable and the first println! kills the workload).
+# Never add a tee.launch_policy.allow_env_override label listing any LLAMA_*
+# variable: an operator who could set LLAMA_UPSTREAM would redirect decrypted
+# user messages outside the enclave (see llama.rs module docs).
 LABEL "tee.launch_policy.log_redirect"="always"
 EXPOSE 8080
 ENTRYPOINT ["/launcher"]

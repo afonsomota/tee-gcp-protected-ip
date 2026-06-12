@@ -138,9 +138,44 @@ The verifier generates a fresh random nonce, fetches the token from
 JWKS, and checks issuer, audience, `eat_nonce`, and
 `submods.container.image_digest`, printing PASS/FAIL per check.
 
+To exercise `/chat` on a deployed enclave without the browser, use
+`scripts/chat-client.py` — it speaks the frontend's HPKE wire format
+(fetch `/hpke-key`, seal the message, open the sealed reply):
+
+```sh
+./scripts/chat-client.py --url "http://$IP:8080" "how was my week?"
+```
+
+Unlike the frontend, the script does not verify the attestation token before
+trusting the enclave key — pair it with `verify-attestation.py`.
+
 Debugging tips: set `-var confidential_space_image_family=confidential-space-debug`
 to get an SSH-able debug image, and check serial port 1 / Cloud Logging for
 container logs (`tee-container-log-redirect=true` is set).
+
+## Inference footprint & boot time
+
+Measured for issue #6 with Gemma 4 E2B QAT Q4 (`gemma-4-E2B_q4_0-it.gguf`)
+under the supervised launcher, per llama.cpp's own memory accounting:
+
+| What | Size |
+|---|---|
+| Model weights | ~3.2 GiB |
+| KV cache (default 128k context) | ~0.8 GiB |
+| Compute buffer | ~0.5 GiB |
+| Launcher | ~5 MiB |
+| **Total** | **≈ 4.5 GiB** |
+
+On the default `n2d-standard-4` (16 GB) that leaves >10 GiB headroom for the
+EmbeddingGemma instance (issue #11). If memory ever gets tight,
+`LLAMA_EXTRA_ARGS="--ctx-size 8192"` shaves ~0.7 GiB off the KV cache.
+
+Cold boot to `/health` ok: **5.6 s locally** (M-series laptop; model load
+dominates). On the CVM the number will be larger — the ~3.4 GB image pull
+dominates — and is logged as `inference: llama-server ready in Ns`.
+
+TODO(on-VM numbers): capture the on-CVM cold-boot time and memory headroom
+from Cloud Logging on the next paid deploy and record them here.
 
 ## Live run
 
