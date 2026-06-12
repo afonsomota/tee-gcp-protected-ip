@@ -131,3 +131,21 @@ no wall-clock leakage into the digest.
    image is produced solely by the recipe above.
 
 Implementation: issue 012 (reproducible release pipeline).
+
+---
+
+## Addendum (2026-06-12, issue 006): the recipe no longer matches the runtime
+
+Chat inference (issue 006) changed what the launcher needs at runtime: it
+supervises a `llama-server` binary (default `/app/llama-server`) and needs
+model weights. An image built by the recipe above — exactly one layer,
+exactly the launcher binary — boots, but `/chat` serves 503 permanently.
+
+**Resolved in spike 002** (`002-llama-server-in-release-image.md`,
+2026-06-12): the release image becomes the digest-pinned official llama.cpp
+server image as base plus the reproducible launcher layer appended with
+pinned crane — D stays verifier-recomputable; weights are never baked
+(delivered at boot via issue 007; until then release builds serve 503 on
+`/chat`). An earlier recommendation recorded here — building `llama-server`
+into the deterministic layer itself — was considered and shelved as future
+hardening; spike 002 has the reasoning.

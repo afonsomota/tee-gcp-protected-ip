@@ -35,7 +35,7 @@ variable "repository_id" {
 variable "machine_type" {
   description = "Confidential VM machine type (N2D for SEV-SNP)"
   type        = string
-  default     = "n2d-standard-2"
+  default     = "n2d-standard-4"
 }
 
 variable "confidential_space_image_family" {

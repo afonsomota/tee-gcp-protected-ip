@@ -2,8 +2,11 @@
 //! attestation-token endpoint. This is the seed of the audited TCB described
 //! in docs/DESIGN.md.
 
+mod chat;
 mod hpke_channel;
 mod keys;
+mod llama;
+mod upstream;
 
 use std::sync::Arc;
 
@@ -28,6 +31,9 @@ pub struct AppState {
     /// Dev mode: serve an *unsigned* attestation-shaped token (see
     /// `keys::EnclaveKeys::dev_token`) so the frontend can run locally.
     pub dev: bool,
+    /// `host:port` of the llama-server `/chat` proxies to (see `llama.rs`);
+    /// `None` when no model is configured.
+    pub inference: Option<String>,
 }
 
 fn app(state: AppState) -> Router {
@@ -36,6 +42,7 @@ fn app(state: AppState) -> Router {
         .route("/attestation", get(attestation))
         .route("/hpke-key", get(hpke_channel::hpke_key))
         .route("/hpke/echo", post(hpke_channel::hpke_echo))
+        .route("/chat", post(chat::chat))
         // Attestation and the HPKE channel carry their own trust; the
         // frontend is served from a different origin (GitHub Pages / Vite).
         .layer(tower_http::cors::CorsLayer::permissive())
@@ -53,6 +60,7 @@ async fn main() {
     let state = AppState {
         keys: Arc::new(keys::EnclaveKeys::generate()),
         dev,
+        inference: llama::init_from_env(dev),
     };
     println!(
         "enclave key bindings: {} {}",
@@ -184,6 +192,7 @@ mod tests {
         AppState {
             keys: Arc::new(keys::EnclaveKeys::generate()),
             dev,
+            inference: None,
         }
     }
 
