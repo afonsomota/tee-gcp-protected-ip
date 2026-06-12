@@ -55,3 +55,22 @@ variable "static_ip_name" {
   type        = string
   default     = "tee-example-cvm"
 }
+
+variable "deployment_suffix" {
+  description = <<-EOT
+    Suffix for a per-branch dev deployment running alongside prod ("" = prod).
+    Non-empty: resource names get "-<suffix>" appended, the CVM takes an
+    ephemeral external IP instead of the bootstrap static one, and state must
+    live in the Terraform workspace named after the suffix. Use `make
+    dev-deploy`, which derives a valid suffix from the git branch.
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    # ≤ 23 chars keeps the service-account account_id
+    # ("tee-ex-<suffix>", limit 30) and instance name within GCP limits.
+    condition     = can(regex("^$|^[a-z][a-z0-9-]{0,21}[a-z0-9]$", var.deployment_suffix))
+    error_message = "deployment_suffix must be \"\" (prod) or 2-23 chars of [a-z0-9-], starting with a letter and ending with a letter or digit."
+  }
+}

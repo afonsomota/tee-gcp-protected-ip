@@ -137,6 +137,48 @@ Debugging tips: set `-var confidential_space_image_family=confidential-space-deb
 to get an SSH-able debug image, and check serial port 1 / Cloud Logging for
 container logs (`tee-container-log-redirect=true` is set).
 
+## Per-branch dev deployments
+
+A feature branch can be deployed to its own CVM alongside prod (issue #28),
+e.g. for on-VM measurements, without touching the production deployment:
+
+```sh
+make dev-deploy PROJECT_ID=YOUR_PROJECT_ID    # from the feature branch
+make dev-destroy PROJECT_ID=YOUR_PROJECT_ID   # tear down this branch's CVM only
+make dev-list                                 # what's (potentially) still up
+```
+
+`dev-deploy` derives a deployment suffix from the branch name
+(`scripts/dev-slug.sh` → `dev-<slug>`, sanitized and truncated so the
+service-account `account_id` stays within GCP's 30-char limit), buildx-pushes
+the launcher image tagged `dev-<slug>` (non-reproducible digest — dev only;
+releases still come from `make image`), and applies the main root with
+`-var deployment_suffix=dev-<slug>` in a **Terraform workspace** of the same
+name. Prod lives in the `default` workspace with an empty suffix, so its
+state and resource names are untouched, and a dev `destroy` can only ever
+see its own workspace's resources: `tee-example-cvm-dev-<slug>`, service
+account `tee-ex-dev-<slug>`, firewall `tee-example-allow-http-dev-<slug>`.
+
+Dev CVMs take an **ephemeral external IP** — `dev-deploy` prints it, along
+with a ready-made `verify-attestation.py` line. The bootstrap static IP (and
+the DNS pointing at it) belongs to prod alone. To point the frontend at a
+dev enclave, drop the printed address into `frontend/.env.local`:
+
+```sh
+VITE_API_ENDPOINT=http://DEV_IP:8080
+```
+
+**Cost**: every dev deployment is a full SEV-SNP N2D instance billed while
+it runs. Tear yours down when done; `make dev-list` shows leftover
+workspaces, and dev instances carry labels for sweeping by hand:
+
+```sh
+gcloud compute instances list --filter=labels.created-by=dev-deploy
+```
+
+Running several deployments at once also eats into the regional N2D vCPU
+quota (`europe-west4`) — check it before assuming many can coexist.
+
 ## Live run
 
 Completed 2026-06-10 against project `tees-499001`: `/echo` responded and the
