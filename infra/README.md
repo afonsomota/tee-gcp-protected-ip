@@ -8,8 +8,8 @@ Two Terraform roots:
 
 | Root | Purpose | Lifecycle |
 |---|---|---|
-| `infra/bootstrap/` | Required APIs + Artifact Registry repo + static external IP + Terraform state bucket | Apply **once** per project, never destroy |
-| `infra/` | Service account, firewall, the CVM itself | Apply/destroy per deployment |
+| `infra/bootstrap/` | Required APIs + Artifact Registry repo + static external IP + Terraform state bucket + artifact delivery's long-lived halves (artifacts bucket, KMS key, workload identity pool) | Apply **once** per project, never destroy |
+| `infra/` | Service account, firewall, the CVM itself, per-digest KMS decrypt grant | Apply/destroy per deployment |
 
 The static IP lives in bootstrap so the CVM comes back on the **same address**
 after every destroy/apply cycle — DNS pointed at it never goes stale. The main
@@ -121,24 +121,21 @@ The frontend's custom domain is a separate concern: it's a CNAME to
 `<user>.github.io` configured through GitHub Pages (issue #13), not anything
 in `infra/`.
 
-### Workload identity pool — not needed yet
+### Workload identity pool (attestation → IAM principal)
 
-Retrieving a plain attestation token (what this skeleton does) requires **no
-workload identity pool**: the in-VM attestation service mints the OIDC token
-directly over `/run/container_launcher/teeserver.sock`. A WIP + provider with
-an attribute condition on `submods.container.image_digest` becomes necessary
-in issue 007, when KMS decrypt access is gated on a valid attestation. Set it
-up then, roughly:
-
-```sh
-gcloud iam workload-identity-pools create tee-pool --location=global
-gcloud iam workload-identity-pools providers create-oidc attestation-verifier \
-  --location=global --workload-identity-pool=tee-pool \
-  --issuer-uri="https://confidentialcomputing.googleapis.com/" \
-  --allowed-audiences="https://sts.googleapis.com" \
-  --attribute-mapping="google.subject=assertion.sub" \
-  --attribute-condition="assertion.submods.container.image_digest == 'sha256:EXPECTED'"
-```
+Retrieving a plain attestation token requires no workload identity pool: the
+in-VM attestation service mints the OIDC token directly over
+`/run/container_launcher/teeserver.sock`. The pool exists for **artifact
+delivery** (issue #7): bootstrap creates pool `tee-example-pool` with
+provider `attestation-verifier`, which accepts the Confidential Space
+attestation JWT and maps `submods.container.image_digest` into
+`attribute.image_digest`. The provider's attribute condition additionally
+requires `'STABLE' in assertion.submods.confidential_space.support_attributes`,
+so the SSH-able `confidential-space-debug` image — where an operator could
+lift decrypted IP straight out of the guest — never gets an IAM principal at
+all. Per deployment, the main root grants `roles/cloudkms.cryptoKeyDecrypter`
+on the artifact-sealing key to the `principalSet` pinned to the deployed
+image digest only (see "Encrypted weights" below).
 
 ## Build & push the workload image
 
@@ -155,9 +152,11 @@ gcloud iam workload-identity-pools providers create-oidc attestation-verifier \
 
 ```sh
 gcloud auth configure-docker europe-west4-docker.pkg.dev
-# MODEL_URL bakes chat-model weights (GGUF) into the image so /chat serves
-# real inference (issue 006; encrypted delivery replaces this in issue 007).
-# Without it the image still works, but /chat returns 503.
+# MODEL_URL (dev only) bakes plaintext chat-model weights (GGUF) into the
+# image so /chat serves real inference (issue 006). Release images ship
+# WITHOUT weights (spike 002): production /chat is activated by encrypted
+# weights delivery instead — see "Encrypted weights" below. Without either,
+# the image still works but /chat returns 503.
 docker buildx build --platform linux/amd64 \
   --build-arg MODEL_URL="https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf" \
   -t europe-west4-docker.pkg.dev/YOUR_PROJECT_ID/tee-example/launcher:latest \
@@ -167,6 +166,75 @@ docker buildx imagetools inspect \
   europe-west4-docker.pkg.dev/YOUR_PROJECT_ID/tee-example/launcher:latest \
   --format '{{json .Manifest.Digest}}'
 ```
+
+## Encrypted weights (attestation-gated artifact delivery)
+
+Issue #7: the model weights are company IP, stored in GCS only as ciphertext
+and decryptable **only inside an attested enclave running the expected image
+digest**. Moving parts:
+
+- **bootstrap** (long-lived; KMS key rings are undeletable and pool IDs stay
+  reserved 30 days after delete): artifacts bucket
+  `YOUR_PROJECT_ID-tee-example-artifacts`, KMS key ring `tee-example` with
+  key `artifact-sealing`, workload identity pool + provider (above), and
+  encrypt-only IAM for the provisioning operator via
+  `-var 'artifact_encrypter_members=["user:you@example.com"]'`. Even the
+  project owner needs that explicit grant — the basic role carries no KMS
+  data-plane permissions, and nobody outside an enclave ever holds decrypt.
+- **provisioning** (`scripts/provision-weights.py`): downloads the GGUF,
+  envelope-encrypts it with a fresh DEK (ChaCha20-Poly1305 STREAM), wraps
+  the DEK with the KMS key, uploads ciphertext + manifest, and prints the
+  `weights_object` value for `infra/terraform.tfvars`. Idempotent —
+  re-running with the same model is a no-op.
+- **main root**: with `weights_object` set, the CVM gets metadata attributes
+  the launcher reads at boot (bucket/object/key/pool-provider audience), a
+  `tee-mount` tmpfs at `/models` (decrypted weights live only in SEV-SNP
+  guest memory; the image label `tee.launch_policy.allow_mount_destinations`
+  admits the mount), GCS read for the ciphertext, and the per-digest KMS
+  decrypt grant.
+- **launcher** (`launcher/src/artifacts.rs` + `gcp.rs`): exchanges its
+  attestation JWT at STS for the pool principal, unwraps the DEK, streams
+  the ciphertext through the envelope decryptor onto the tmpfs, verifies
+  size + SHA-256, and starts llama-server.
+
+```sh
+# One-time per project: grant yourself encrypt (re-apply of bootstrap)
+terraform -chdir=infra/bootstrap apply -var project_id=YOUR_PROJECT_ID \
+  -var 'artifact_encrypter_members=["user:you@example.com"]'
+
+# Encrypt + upload the weights; prints the weights_object to set
+./scripts/provision-weights.py --project YOUR_PROJECT_ID
+
+# Add it to infra/terraform.tfvars and (re)apply — make deploy only passes
+# project_id and image_digest, the rest auto-loads from tfvars
+echo 'weights_object = "weights/gemma-4-E2B_q4_0-it.gguf.manifest.json"' >> infra/terraform.tfvars
+terraform -chdir=infra apply
+```
+
+The CVM must run the **production** `confidential-space` family: the
+provider's STABLE condition denies the debug image by design (don't "fix"
+this by loosening the condition).
+
+### Negative test: same service account, no attestation
+
+`scripts/test-kms-denial.sh` proves the gate is the attestation, not the
+service account: it boots a plain (non-confidential) e2-small VM with the
+same workload SA and scopes, has it attempt to unwrap the real DEK, and
+expects KMS to answer 403. The VM is deleted on exit.
+
+```sh
+./scripts/test-kms-denial.sh YOUR_PROJECT_ID weights/gemma-4-E2B_q4_0-it.gguf.manifest.json
+```
+
+### Rotation / revocation
+
+The decrypt grant is pinned to one image digest, so rotating the digest in
+Terraform revokes every previously released image: apply with the new
+`image_digest` and the `principalSet` member is replaced — old images can
+still pull the ciphertext but can no longer unwrap the DEK. Caveat for
+[per-branch dev deployments](#per-branch-dev-deployments): two workspaces
+deploying the *same* digest create the same IAM binding twice, and the first
+destroy removes it for both — acceptable for dev churn.
 
 ## Deploy, verify, destroy
 
@@ -338,12 +406,18 @@ gcloud auth login
 gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
 
-# 2. One-time project setup: enable APIs + create the Artifact Registry repo
-#    and the state bucket. Fresh project? Use the two-phase flow from
-#    "One-time GCP project setup" above instead of these two lines.
+# 2. One-time project setup: enable APIs + create the Artifact Registry repo,
+#    the state bucket, and the artifact-delivery resources (bucket, KMS key,
+#    workload identity pool). Fresh project? Use the two-phase flow from
+#    "One-time GCP project setup" above for the init.
 terraform -chdir=infra/bootstrap init \
   -backend-config="bucket=YOUR_PROJECT_ID-tfstate" -backend-config="prefix=bootstrap"
-terraform -chdir=infra/bootstrap apply -var project_id=YOUR_PROJECT_ID
+terraform -chdir=infra/bootstrap apply -var project_id=YOUR_PROJECT_ID \
+  -var 'artifact_encrypter_members=["user:YOU@example.com"]'
+
+# 2b. Provision the encrypted weights (idempotent; prints the weights_object
+#     value used in step 4)
+./scripts/provision-weights.py --project YOUR_PROJECT_ID
 
 # 3. Build & push the workload image, capture its digest
 gcloud auth configure-docker europe-west4-docker.pkg.dev
@@ -359,17 +433,22 @@ DIGEST=$(docker buildx imagetools inspect \
 terraform -chdir=infra init \
   -backend-config="bucket=YOUR_PROJECT_ID-tfstate" -backend-config="prefix=cvm"
 cat > infra/terraform.tfvars <<EOF
-project_id   = "YOUR_PROJECT_ID"
-image_digest = "$DIGEST"
+project_id     = "YOUR_PROJECT_ID"
+image_digest   = "$DIGEST"
+weights_object = "weights/gemma-4-E2B_q4_0-it.gguf.manifest.json"  # from step 2b
 EOF
 terraform -chdir=infra apply
 
-# 5. Exercise the workload (allow a couple of minutes for boot + image pull)
+# 5. Exercise the workload (allow a couple of minutes for boot + image pull,
+#    plus weights download + decrypt before /chat answers)
 IP=$(terraform -chdir=infra output -raw external_ip)
 curl "http://$IP:8080/echo?msg=hello"
+./scripts/chat-client.py --url "http://$IP:8080" "hello in five words"
 
-# 6. Verify the attestation token end to end (expects RESULT: PASS)
+# 6. Verify the attestation token end to end (expects RESULT: PASS), and that
+#    a non-attested VM with the same service account cannot unwrap the DEK
 ./scripts/verify-attestation.py --url "http://$IP:8080" --image-digest "$DIGEST"
+./scripts/test-kms-denial.sh YOUR_PROJECT_ID weights/gemma-4-E2B_q4_0-it.gguf.manifest.json
 
 # 7. Tear everything down
 # Same-env run (vars already in infra/terraform.tfvars):

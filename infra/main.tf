@@ -48,6 +48,36 @@ locals {
   # The workspace a deployment's state must live in: prod in `default`,
   # dev deployments in the workspace named after their suffix.
   expected_workspace = local.is_prod ? "default" : var.deployment_suffix
+
+  # ---- Attestation-gated weights delivery (issue #7) ------------------------
+  weights_enabled = var.weights_object != null && var.weights_object != ""
+
+  # Long-lived names created by infra/bootstrap, reconstructed here instead of
+  # read from its outputs so this root has no dependency on bootstrap's state.
+  artifacts_bucket = "${var.project_id}-tee-example-artifacts"
+  artifact_kms_key = "projects/${var.project_id}/locations/${var.region}/keyRings/tee-example/cryptoKeys/artifact-sealing"
+  wip_pool         = "projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/tee-example-pool"
+  wip_audience     = "//iam.googleapis.com/${local.wip_pool}/providers/attestation-verifier"
+
+  # Launcher config travels as instance metadata attributes (read via the
+  # metadata server), NOT as tee-env-* launch-policy overrides: the release
+  # image deliberately omits tee.launch_policy.allow_env_override, so the
+  # operator cannot inject environment into the audited workload.
+  weights_metadata = local.weights_enabled ? {
+    weights-bucket       = local.artifacts_bucket
+    weights-object       = var.weights_object
+    weights-kms-key      = local.artifact_kms_key
+    weights-wip-audience = local.wip_audience
+    # tmpfs at /models so decrypted weights only ever exist in guest memory
+    # (encrypted by SEV-SNP), never on disk. Requires the image label
+    # tee.launch_policy.allow_mount_destinations=/models.
+    tee-mount = "type=tmpfs,source=tmpfs,destination=/models,size=${var.weights_tmpfs_bytes}"
+  } : {}
+}
+
+# Project number is needed to name the workload identity pool principalSet.
+data "google_project" "current" {
+  project_id = var.project_id
 }
 
 # Static external IP reserved by infra/bootstrap. Looked up by name rather
@@ -86,6 +116,29 @@ resource "google_project_iam_member" "ar_reader" {
   member  = "serviceAccount:${google_service_account.workload.email}"
 }
 
+# Read access to the ciphertext artifacts. Deliberately weak on its own:
+# the blobs are envelope-encrypted, so confidentiality rests on the KMS
+# decrypt grant below, not on this bucket ACL.
+resource "google_storage_bucket_iam_member" "artifacts_reader" {
+  count  = local.weights_enabled ? 1 : 0
+  bucket = local.artifacts_bucket
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.workload.email}"
+}
+
+# The per-deployment half of attestation-gated delivery: KMS decrypt for the
+# attested principalSet pinned to *this* image digest. Applying with a new
+# digest replaces the member, revoking every previously deployed image — the
+# rotation/revocation story from issue #7. Note for dev deployments: two
+# workspaces deploying the same digest create the same binding twice; the
+# first `terraform destroy` removes it for both. Acceptable for dev churn.
+resource "google_kms_crypto_key_iam_member" "weights_decrypter" {
+  count         = local.weights_enabled && var.image_digest != null ? 1 : 0
+  crypto_key_id = local.artifact_kms_key
+  role          = "roles/cloudkms.cryptoKeyDecrypter"
+  member        = "principalSet://iam.googleapis.com/${local.wip_pool}/attribute.image_digest/${var.image_digest}"
+}
+
 # IAM grants on a freshly created service account are eventually consistent
 # (up to a couple of minutes). Without this wait the CVM boots before the
 # grants propagate: it can't pull the image (artifactregistry.reader) or
@@ -97,6 +150,8 @@ resource "time_sleep" "iam_propagation" {
     google_project_iam_member.workload_user,
     google_project_iam_member.log_writer,
     google_project_iam_member.ar_reader,
+    google_storage_bucket_iam_member.artifacts_reader,
+    google_kms_crypto_key_iam_member.weights_decrypter,
   ]
   create_duration = "120s"
 }
@@ -160,10 +215,13 @@ resource "google_compute_instance" "cvm" {
     }
   }
 
-  metadata = {
-    tee-image-reference        = local.image_reference
-    tee-container-log-redirect = "true"
-  }
+  metadata = merge(
+    {
+      tee-image-reference        = local.image_reference
+      tee-container-log-redirect = "true"
+    },
+    local.weights_metadata,
+  )
 
   service_account {
     email  = google_service_account.workload.email

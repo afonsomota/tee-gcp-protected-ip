@@ -48,5 +48,9 @@ ENV LLAMA_ARG_HOST=127.0.0.1
 # variable: an operator who could set LLAMA_UPSTREAM would redirect decrypted
 # user messages outside the enclave (see llama.rs module docs).
 LABEL "tee.launch_policy.log_redirect"="always"
+# Allow the operator's tee-mount tmpfs at /models: artifact delivery
+# (issue 007) decrypts the weights there so plaintext only ever exists in
+# SEV-SNP-encrypted guest memory, never on disk.
+LABEL "tee.launch_policy.allow_mount_destinations"="/models"
 EXPOSE 8080
 ENTRYPOINT ["/launcher"]
