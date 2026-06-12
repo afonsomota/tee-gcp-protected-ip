@@ -158,7 +158,7 @@ single layer containing a single static binary on an empty base.
   public, auditable, and upstream artifacts used by many parties.
 - Known wrinkle: one build input (`musl-dev`, pinned by exact version) comes
   from Alpine's package repo, which keeps only the latest version per
-  branch. When Alpine rolls it, rebuilds of *older* tags fail loudly rather
+  branch. When Alpine rolls it, rebuilds of *older* tags fai rather
   than producing a different digest (the README documents this and the
   planned fix).
 
