@@ -47,7 +47,8 @@ push: require-project require-digest
 # var.image_digest, this target then also rotates KMS access to the new
 # digest (old digests stop being admitted).
 deploy: require-project require-digest
-	terraform -chdir=infra init -input=false
+	terraform -chdir=infra init -input=false \
+	  -backend-config="bucket=$(PROJECT_ID)-tfstate" -backend-config="prefix=cvm"
 	terraform -chdir=infra workspace select default
 	terraform -chdir=infra apply -var project_id=$(PROJECT_ID) -var image_digest=$(IMAGE_DIGEST)
 
@@ -72,7 +73,8 @@ dev-deploy: require-project
 	echo "==> dev deployment $$suffix"; \
 	docker buildx build --platform linux/amd64 -t $$image --push launcher/; \
 	digest=$$(docker buildx imagetools inspect $$image --format '{{json .Manifest.Digest}}' | tr -d '"'); \
-	terraform -chdir=infra init -input=false; \
+	terraform -chdir=infra init -input=false \
+	  -backend-config="bucket=$(PROJECT_ID)-tfstate" -backend-config="prefix=cvm"; \
 	terraform -chdir=infra workspace select -or-create $$suffix; \
 	terraform -chdir=infra apply -var project_id=$(PROJECT_ID) -var image_digest=$$digest -var deployment_suffix=$$suffix \
 	  || { terraform -chdir=infra workspace select default; exit 1; }; \
