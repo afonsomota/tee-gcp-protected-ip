@@ -81,7 +81,7 @@ asking users to trust closed code.**
 - Cannot read enclave memory through the normal hypervisor path (SEV-SNP
   encrypts guest memory; that is the product).
 - Could mint a false attestation token or backdoor the Confidential Space
-  stack — platform TCB, accepted and documented rather than hand-waved.
+  stack — platform TCB, **accepted and documented**.
 - Sees traffic metadata (IPs, timing, sizes) like any host.
 
 **A network attacker:**
