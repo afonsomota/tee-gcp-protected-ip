@@ -44,6 +44,7 @@ import json
 import secrets
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -233,25 +234,133 @@ def kms_wrap(token: str, key: str, dek: bytes) -> str:
 
 # ---- provisioning steps -----------------------------------------------------
 
-def download_model(url: str, cache_dir: Path) -> Path:
+class _StallError(Exception):
+    """An attempt was making no real progress and was aborted to be retried."""
+
+
+class _StallGuard:
+    """Abort an attempt whose throughput stays below a floor over a window.
+
+    A read timeout only fires when *no* byte arrives within the timeout; a
+    server that trickles bytes forever (HF's Xet endpoint did exactly this,
+    ~54 KB/s then stalls) never trips it. The floor is deliberately low — a
+    slow-but-progressing stream should keep going (resuming repeatedly is
+    worse); only a near-dead one (< min_bytes per window) is killed.
+    """
+
+    def __init__(self, window_s: float, min_bytes: int, clock=time.time):
+        self.window_s = window_s
+        self.min_bytes = min_bytes
+        self.clock = clock
+        self.mark_t = clock()
+        self.mark_bytes = 0
+
+    def update(self, total_bytes: int) -> None:
+        now = self.clock()
+        if now - self.mark_t < self.window_s:
+            return
+        if total_bytes - self.mark_bytes < self.min_bytes:
+            raise _StallError(
+                f"{total_bytes - self.mark_bytes} B in {now - self.mark_t:.0f}s"
+            )
+        self.mark_t = now
+        self.mark_bytes = total_bytes
+
+
+def _expected_total(resp, have: int) -> int | None:
+    """Total file size from a (possibly partial) response, or None if unknown."""
+    content_range = resp.headers.get("Content-Range", "")
+    if "/" in content_range:
+        tail = content_range.rsplit("/", 1)[-1].strip()
+        if tail.isdigit():
+            return int(tail)
+    length = resp.headers.get("Content-Length")
+    if length and length.isdigit():
+        return have + int(length)
+    return None
+
+
+def _download_attempt(url: str, auth: dict, part: Path, chunk_size: int,
+                      stall_window_s: float, stall_min_bytes: int) -> int:
+    """One streamed GET that resumes the `.part` file. Returns the byte count
+    fetched so far; raises on any interruption (caller retries).
+
+    `requests.iter_content` drops the in-flight block on a mid-stream
+    connection error, so resume granularity is `chunk_size` — a drop loses at
+    most the current chunk, never the whole file.
+    """
+    have = part.stat().st_size if part.exists() else 0
+    headers = dict(auth)
+    if have:
+        headers["Range"] = f"bytes={have}-"
+    with requests.get(url, headers=headers, stream=True, timeout=60,
+                      allow_redirects=True) as resp:
+        if have and resp.status_code == 416:
+            # range past EOF — the whole file is already on disk
+            return have
+        if have and resp.status_code == 200:
+            # server (or a Xet 307 redirect target) ignored Range: start over
+            part.unlink(missing_ok=True)
+            have = 0
+        resp.raise_for_status()
+        total = _expected_total(resp, have)
+        guard = _StallGuard(stall_window_s, stall_min_bytes)
+        got = have
+        with part.open("ab" if have else "wb") as f:
+            for block in resp.iter_content(chunk_size=chunk_size):
+                if not block:
+                    continue
+                f.write(block)
+                got += len(block)
+                guard.update(got)
+    if total is not None and got < total:
+        # clean EOF short of Content-Length — treat as a drop and resume
+        raise _StallError(f"stream ended at {got} B of {total} B")
+    return got
+
+
+def download_model(url: str, cache_dir: Path, *, max_attempts: int = 8,
+                   chunk_size: int = 2**20, stall_window_s: float = 30.0,
+                   stall_min_bytes: int = 64 * 1024) -> Path:
+    """Download to `<name>.part`, resuming across mid-stream drops, then rename.
+
+    Multi-GB gated GGUFs over HF's Xet endpoint drop and throttle; a single
+    non-resumable stream restarts from byte 0 on every blip. This keeps the
+    partial file, sends `Range: bytes=<have>-`, and retries with backoff.
+    """
     filename = url.rsplit("/", 1)[-1]
     target = cache_dir / filename
     if target.exists():
         print(f"  model cached at {target}")
         return target
     cache_dir.mkdir(parents=True, exist_ok=True)
-    headers = {}
+    auth = {}
     if HF_TOKEN_PATH.exists():
-        headers["Authorization"] = f"Bearer {HF_TOKEN_PATH.read_text().strip()}"
-    print(f"  downloading {url} ...")
+        auth["Authorization"] = f"Bearer {HF_TOKEN_PATH.read_text().strip()}"
     part = target.with_suffix(target.suffix + ".part")
-    with requests.get(url, headers=headers, stream=True, timeout=60) as resp:
-        resp.raise_for_status()
-        with part.open("wb") as f:
-            for block in resp.iter_content(chunk_size=2**20):
-                f.write(block)
-    part.rename(target)
-    return target
+    print(f"  downloading {url} ...")
+
+    backoff = 1.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            total = _download_attempt(
+                url, auth, part, chunk_size, stall_window_s, stall_min_bytes)
+        except (requests.RequestException, _StallError) as err:
+            have = part.stat().st_size if part.exists() else 0
+            if attempt == max_attempts:
+                raise SystemExit(
+                    f"  download failed after {attempt} attempts "
+                    f"({have} B fetched): {err}"
+                )
+            print(f"  attempt {attempt} interrupted at {have} B ({err}); "
+                  f"resuming in {backoff:.0f}s ...")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+            continue
+        part.rename(target)
+        print(f"  downloaded {total} B")
+        return target
+    raise SystemExit("  download failed: retries exhausted")  # unreachable
 
 
 def sha256_file(path: Path) -> str:
