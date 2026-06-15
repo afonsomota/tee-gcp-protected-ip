@@ -63,7 +63,12 @@ export async function runAttestation(
       `GET /attestation failed: HTTP ${attResponse.status}`,
     );
   }
-  const attBody = (await attResponse.json()) as { token?: string; dev?: boolean; error?: string };
+  let attBody: { token?: string; dev?: boolean; error?: string };
+  try {
+    attBody = (await attResponse.json()) as { token?: string; dev?: boolean; error?: string };
+  } catch {
+    throw new AttestationError("ATTESTATION_FETCH_FAILED", "attestation response is not valid JSON");
+  }
   if (!attBody.token) {
     throw new AttestationError(
       "ATTESTATION_FETCH_FAILED",
@@ -77,7 +82,12 @@ export async function runAttestation(
       `GET /hpke-key failed: HTTP ${keyResponse.status}`,
     );
   }
-  const keyBody = (await keyResponse.json()) as { public_key?: string };
+  let keyBody: { public_key?: string };
+  try {
+    keyBody = (await keyResponse.json()) as { public_key?: string };
+  } catch {
+    throw new AttestationError("KEY_FETCH_FAILED", "hpke-key response is not valid JSON");
+  }
   if (typeof keyBody.public_key !== "string") {
     throw new AttestationError("KEY_FETCH_FAILED", "hpke-key response carries no public_key");
   }

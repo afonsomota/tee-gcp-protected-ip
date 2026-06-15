@@ -32,6 +32,14 @@ export function ChatPane() {
   }, [verify]);
 
   useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void verify();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [verify]);
+
+  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [history]);
 

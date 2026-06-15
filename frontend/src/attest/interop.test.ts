@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { b64decode, b64encode, makeSuite, open, seal } from "./hpke";
+import { CHAT_REQUEST_INFO, CHAT_RESPONSE_INFO } from "./chat";
 import { AttestationError, checkClaims, sha256Hex, type AttestationClaims } from "./verify";
 
 const FIXTURES = join(
@@ -91,6 +92,66 @@ describe("hpke interop with the rust `hpke` crate", () => {
   });
 });
 
+async function generateChatFixture(infoStr: string, label: string): Promise<Fixture & { suite: object; generator: string; aad: string }> {
+  const suite = makeSuite();
+  const keyPair = await suite.kem.generateKeyPair();
+  const info = new TextEncoder().encode(infoStr);
+  const plaintext = new TextEncoder().encode(label);
+  const publicKeyRaw = new Uint8Array(await suite.kem.serializePublicKey(keyPair.publicKey));
+  const envelope = await seal(publicKeyRaw, info, plaintext);
+  return {
+    suite: { kem: "DHKEM(X25519, HKDF-SHA256)", kdf: "HKDF-SHA256", aead: "ChaCha20Poly1305" },
+    generator: "hpke-js @hpke/core v1.9",
+    recipient_private_key: b64encode(
+      new Uint8Array(await suite.kem.serializePrivateKey(keyPair.privateKey)),
+    ),
+    recipient_public_key: b64encode(publicKeyRaw),
+    info: b64encode(info),
+    aad: "",
+    plaintext: b64encode(plaintext),
+    enc: envelope.enc,
+    ct: envelope.ct,
+  };
+}
+
+describe("hpke chat channel interop with the rust `hpke` crate", () => {
+  it("generates (once) and opens the ts chat/request fixture; cargo test opens it too", async () => {
+    const path = join(FIXTURES, "hpke-chat-request-ts.json");
+    if (!existsSync(path)) {
+      const fixture = await generateChatFixture(
+        CHAT_REQUEST_INFO,
+        "hpke chat/request interop vector, sealed by hpke-js (@hpke/core)",
+      );
+      writeFileSync(path, JSON.stringify(fixture, null, 2) + "\n");
+    }
+    await openFixture(JSON.parse(readFileSync(path, "utf8")) as Fixture);
+  });
+
+  it("generates (once) and opens the ts chat/response fixture; cargo test opens it too", async () => {
+    const path = join(FIXTURES, "hpke-chat-response-ts.json");
+    if (!existsSync(path)) {
+      const fixture = await generateChatFixture(
+        CHAT_RESPONSE_INFO,
+        "hpke chat/response interop vector, sealed by hpke-js (@hpke/core)",
+      );
+      writeFileSync(path, JSON.stringify(fixture, null, 2) + "\n");
+    }
+    await openFixture(JSON.parse(readFileSync(path, "utf8")) as Fixture);
+  });
+
+  it("opens the rust-generated chat/request fixture", async () => {
+    const path = join(FIXTURES, "hpke-chat-request.json");
+    expect(existsSync(path), `missing ${path}: run \`cargo test\` in launcher/ to generate it`).toBe(true);
+    await openFixture(JSON.parse(readFileSync(path, "utf8")) as Fixture);
+  });
+
+  it("opens the rust-generated chat/response fixture", async () => {
+    const path = join(FIXTURES, "hpke-chat-response.json");
+    expect(existsSync(path), `missing ${path}: run \`cargo test\` in launcher/ to generate it`).toBe(true);
+    await openFixture(JSON.parse(readFileSync(path, "utf8")) as Fixture);
+  });
+});
+
 describe("attestation claim checks fail distinctly", () => {
   const hpkePublicKey = new Uint8Array(32).fill(7);
   const challenge = "0123456789abcdef";
@@ -126,5 +187,9 @@ describe("attestation claim checks fail distinctly", () => {
     expect(await failureCode({ hpkePublicKey: new Uint8Array(32).fill(8) })).toBe(
       "KEY_HASH_MISMATCH",
     );
+  });
+
+  it("reports DIGEST_UNCONFIGURED when expectedImageDigest is empty", async () => {
+    expect(await failureCode({ expectedImageDigest: "" })).toBe("DIGEST_UNCONFIGURED");
   });
 });

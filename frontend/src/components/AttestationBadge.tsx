@@ -13,6 +13,7 @@ const FAILURE_LABELS: Record<FailureCode | typeof NETWORK_ERROR_CODE, string> = 
   TOKEN_SIGNATURE_INVALID: "Token signature invalid",
   CHALLENGE_MISMATCH: "Challenge mismatch (possible replay)",
   IMAGE_DIGEST_MISMATCH: "Image digest mismatch — wrong workload",
+  DIGEST_UNCONFIGURED: "Expected digest not configured — set VITE_EXPECTED_IMAGE_DIGEST",
   KEY_HASH_MISMATCH: "Key not bound in attestation token",
   ATTESTATION_FETCH_FAILED: "Could not fetch attestation token",
   KEY_FETCH_FAILED: "Could not fetch enclave key",
