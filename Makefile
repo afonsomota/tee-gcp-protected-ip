@@ -16,8 +16,14 @@ TAG          ?= release
 IMAGE_DIGEST ?= $(shell cat dist/image-digest.txt 2>/dev/null)
 IMAGE_REPO    = $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(REPOSITORY)/launcher
 CRANE        ?= $(firstword $(wildcard dist/tools/crane-*) crane)
+# Pinned llama.cpp base (single source of truth: scripts/build-image.sh)
+LLAMA_BASE_DIGEST = $(shell sed -n 's/^LLAMA_BASE_DIGEST="\(.*\)"/\1/p' scripts/build-image.sh)
+BASE_MIRROR_REPO  = $(REGION)-docker.pkg.dev/$(PROJECT_ID)/$(REPOSITORY)/llama.cpp
+# Per-digest mirror tag: each pinned base keeps its own tag across bumps, so
+# rebuilds of old releases never lose their mirror to a tag overwrite.
+BASE_MIRROR_TAG   = server-base-$(shell printf '%.12s' '$(patsubst sha256:%,%,$(LLAMA_BASE_DIGEST))')
 
-.PHONY: image digest push deploy verify destroy dev-deploy dev-destroy dev-list clean require-project require-digest
+.PHONY: image digest push mirror-base deploy verify destroy dev-deploy dev-destroy dev-list clean require-project require-digest require-llama-base-digest require-crane
 
 ## image: deterministic release build -> digest D in dist/image-digest.txt
 image:
@@ -32,6 +38,18 @@ require-project:
 require-digest:
 	@test -n "$(IMAGE_DIGEST)" || { echo "IMAGE_DIGEST is empty; run 'make image' first or pass IMAGE_DIGEST=sha256:..."; exit 1; }
 
+require-llama-base-digest:
+	@echo "$(LLAMA_BASE_DIGEST)" | grep -Eq '^sha256:[0-9a-f]{64}$$' \
+	  || { echo "LLAMA_BASE_DIGEST='$(LLAMA_BASE_DIGEST)' is not sha256:<64 hex>; the sed extraction from scripts/build-image.sh no longer matches"; exit 1; }
+
+# mirror-base can run before any 'make image', in which case the pinned
+# crane (fetched into dist/tools/ by scripts/build-image.sh) is absent and
+# the bare 'crane' from PATH gets used. The copy is digest-asserted either
+# way, so warn rather than fail.
+require-crane:
+	@test "$(CRANE)" != crane \
+	  || echo "warning: pinned crane not found in dist/tools/ — using 'crane' from PATH (run 'make image' once to fetch the pinned version)" >&2
+
 ## push: push dist/oci-layout by digest to Artifact Registry, assert D survived
 push: require-project require-digest
 	$(CRANE) push dist/oci-layout $(IMAGE_REPO):$(TAG)
@@ -40,6 +58,20 @@ push: require-project require-digest
 	  echo "pushed digest $$pushed != expected $(IMAGE_DIGEST)"; exit 1; \
 	fi; \
 	echo "pushed $(IMAGE_REPO)@$$pushed"
+
+## mirror-base: copy the pinned llama.cpp base by digest into Artifact Registry
+# Content-addressed, so the mirror is trust-neutral: verifier rebuilds can
+# pull the base from either ghcr or the mirror (LLAMA_BASE_SOURCE, see
+# scripts/build-image.sh) and derive the same D. Exists so rebuilds of old
+# releases never depend on ghcr retention; the per-digest tag
+# (server-base-<first 12 digest hex>) keeps every pin reachable across bumps.
+mirror-base: require-project require-llama-base-digest require-crane
+	$(CRANE) copy ghcr.io/ggml-org/llama.cpp@$(LLAMA_BASE_DIGEST) $(BASE_MIRROR_REPO):$(BASE_MIRROR_TAG)
+	@mirrored=$$($(CRANE) digest $(BASE_MIRROR_REPO):$(BASE_MIRROR_TAG)); \
+	if [ "$$mirrored" != "$(LLAMA_BASE_DIGEST)" ]; then \
+	  echo "mirrored digest $$mirrored != pinned $(LLAMA_BASE_DIGEST)"; exit 1; \
+	fi; \
+	echo "mirrored $(BASE_MIRROR_REPO)@$$mirrored"
 
 ## deploy: pin IMAGE_DIGEST into the Confidential Space CVM config and apply.
 # The same Terraform root will own the KMS / workload-identity attestation
