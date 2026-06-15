@@ -169,7 +169,7 @@ docker buildx imagetools inspect \
 
 ## Encrypted weights (attestation-gated artifact delivery)
 
-Issue #7: the model weights are company IP, stored in GCS only as ciphertext
+The model weights are company IP, stored in GCS only as ciphertext
 and decryptable **only inside an attested enclave running the expected image
 digest**. Moving parts:
 
