@@ -83,11 +83,14 @@ async fn main() {
             println!("DEV MODE: ignoring TLS_DOMAIN, serving plain HTTP");
         }
     }
-    // TLS (issue 004): enabled by TLS_DOMAIN outside dev mode; see tls.rs.
+    // TLS (issue 004): enabled outside dev mode by the `tls-domain` instance
+    // metadata attribute (or TLS_DOMAIN as a dev/test override); see tls.rs.
     let tls_config = if dev {
         None
     } else {
-        tls::TlsConfig::from_env().expect("invalid TLS configuration")
+        tls::TlsConfig::resolve()
+            .await
+            .expect("invalid TLS configuration")
     };
     if let Some(tls_config) = tls_config {
         tls::serve(state, tls_config).await;

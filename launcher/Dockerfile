@@ -52,5 +52,8 @@ LABEL "tee.launch_policy.log_redirect"="always"
 # (issue 007) decrypts the weights there so plaintext only ever exists in
 # SEV-SNP-encrypted guest memory, never on disk.
 LABEL "tee.launch_policy.allow_mount_destinations"="/models"
-EXPOSE 8080
+# 8080 = plain HTTP; 443 = TLS terminated in-enclave (issue 004), the only
+# port TLS-ALPN-01 validates on. The launcher binds one or the other, never
+# both (launcher/src/main.rs).
+EXPOSE 8080 443
 ENTRYPOINT ["/launcher"]

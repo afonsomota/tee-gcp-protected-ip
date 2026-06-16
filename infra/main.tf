@@ -51,12 +51,16 @@ locals {
 
   tls_enabled = var.tls_domain != ""
 
-  # Confidential Space forwards tee-env-* metadata as container env vars
-  # (admitted by the image's tee.launch_policy.allow_env_override label).
-  tls_env = local.tls_enabled ? {
-    tee-env-TLS_DOMAIN     = var.tls_domain
-    tee-env-ACME_CONTACT   = var.acme_contact
-    tee-env-ACME_DIRECTORY = var.acme_directory
+  # TLS config travels as plain instance metadata attributes (read via the
+  # metadata server by launcher/src/tls.rs), NOT as tee-env-* launch-policy
+  # overrides: the release image deliberately omits
+  # tee.launch_policy.allow_env_override, so the operator cannot inject
+  # environment into the audited workload. Same delivery channel as the
+  # weights config below.
+  tls_metadata = local.tls_enabled ? {
+    tls-domain     = var.tls_domain
+    acme-contact   = var.acme_contact
+    acme-directory = var.acme_directory
   } : {}
 
   # ---- Attestation-gated weights delivery (issue #7) ------------------------
@@ -187,8 +191,8 @@ resource "google_compute_firewall" "allow_http" {
     protocol = "tcp"
     # The launcher binds either plain HTTP or HTTPS, never both (main.rs):
     # open only the port that is actually listening. 443 is fixed — the
-    # TLS-ALPN-01 challenge validates on 443 only, and the image's
-    # allow_env_override label admits no port override.
+    # TLS-ALPN-01 challenge validates on 443 only, and HTTPS_PORT is an
+    # env-only dev/test knob that production never sets.
     ports = local.tls_enabled ? ["443"] : [tostring(var.http_port)]
   }
 
@@ -243,7 +247,7 @@ resource "google_compute_instance" "cvm" {
       tee-image-reference        = local.image_reference
       tee-container-log-redirect = "true"
     },
-    local.tls_env,
+    local.tls_metadata,
     local.weights_metadata,
   )
 

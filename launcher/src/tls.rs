@@ -16,14 +16,26 @@
 //! user-facing privacy guarantee rides on the attested HPKE channel, not on
 //! the certificate authority ecosystem. See docs/DESIGN.md.
 //!
-//! # Configuration (environment)
+//! # Configuration
 //!
-//! | Variable         | Meaning                                              |
-//! |------------------|------------------------------------------------------|
-//! | `TLS_DOMAIN`     | Domain to serve/order a cert for; unset = plain HTTP |
-//! | `ACME_CONTACT`   | Contact email for the ACME account (required)        |
-//! | `ACME_DIRECTORY` | `letsencrypt`, `letsencrypt-staging` (default), or a directory URL |
-//! | `HTTPS_PORT`     | Listen port, default 443 (TLS-ALPN-01 validates on 443 only; non-default is for local testing) |
+//! In production these values arrive as GCE instance metadata attributes set
+//! by Terraform (`tls-domain`, `acme-contact`, `acme-directory`), read via the
+//! metadata server in [`TlsConfig::resolve`]. Deliberately *not* environment
+//! variables: the release image must never carry
+//! `tee.launch_policy.allow_env_override` (scripts/build-image.sh fails the
+//! build if it appears), so the operator has no channel to inject environment
+//! into the audited process. The matching `TLS_DOMAIN` / `ACME_CONTACT` /
+//! `ACME_DIRECTORY` / `HTTPS_PORT` env vars exist as a dev/test override only —
+//! without the launch-policy label they are not operator-settable in
+//! production. `HTTPS_PORT` is env-only (local testing); production always
+//! listens on 443.
+//!
+//! | Attribute / env var          | Meaning                                  |
+//! |------------------------------|------------------------------------------|
+//! | `tls-domain` / `TLS_DOMAIN`  | Domain to serve/order a cert for; unset = plain HTTP |
+//! | `acme-contact` / `ACME_CONTACT` | Contact email for the ACME account (required) |
+//! | `acme-directory` / `ACME_DIRECTORY` | `letsencrypt`, `letsencrypt-staging` (default), or a directory URL |
+//! | `HTTPS_PORT` (env only)      | Listen port, default 443 (TLS-ALPN-01 validates on 443 only; non-default is for local testing) |
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -48,10 +60,6 @@ pub struct TlsConfig {
 impl TlsConfig {
     /// `Ok(None)` when TLS is disabled (`TLS_DOMAIN` unset); `Err` when it is
     /// enabled but incoherently configured — refuse to boot half-configured.
-    pub fn from_env() -> Result<Option<Self>, String> {
-        Self::from_lookup(|name| std::env::var(name).ok())
-    }
-
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         let nonempty = |name: &str| get(name).filter(|value| !value.is_empty());
         let Some(domain) = nonempty("TLS_DOMAIN") else {
@@ -83,6 +91,44 @@ impl TlsConfig {
             directory_url,
             https_port,
         }))
+    }
+
+    /// Resolve TLS configuration for production: `TLS_DOMAIN` etc. from the
+    /// environment first (dev/test override; not operator-settable in
+    /// production, see module docs), otherwise from GCE instance metadata
+    /// attributes (`tls-domain`, `acme-contact`, `acme-directory`). `HTTPS_PORT`
+    /// stays env-only. The gathered values feed the existing [`from_lookup`]
+    /// validation, so a half-configured domain is still a boot error and a
+    /// metadata-server failure is an error, never a silent fallback.
+    ///
+    /// [`from_lookup`]: Self::from_lookup
+    pub async fn resolve() -> Result<Option<Self>, String> {
+        use std::collections::HashMap;
+
+        let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let mut values: HashMap<&'static str, String> = HashMap::new();
+
+        // env-first; only probe metadata for keys the environment didn't set.
+        for (env_name, attribute) in [
+            ("TLS_DOMAIN", "tls-domain"),
+            ("ACME_CONTACT", "acme-contact"),
+            ("ACME_DIRECTORY", "acme-directory"),
+        ] {
+            let value = match env(env_name) {
+                Some(v) => Some(v),
+                None => crate::gcp::instance_attribute(attribute).await?,
+            };
+            if let Some(value) = value {
+                values.insert(env_name, value);
+            }
+        }
+        // HTTPS_PORT is dev/test-only (production validates on 443); never a
+        // metadata attribute.
+        if let Some(port) = env("HTTPS_PORT") {
+            values.insert("HTTPS_PORT", port);
+        }
+
+        Self::from_lookup(|name| values.get(name).cloned())
     }
 }
 
