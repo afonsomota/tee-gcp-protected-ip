@@ -339,6 +339,39 @@ textarea {
   margin: 0;
 }
 
+/* Tool activity: makes the data-minimization flow visible — what the enclave
+   asked the browser to do, and what (if anything) left the device. */
+.chat-tool {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  align-self: stretch;
+  padding: 0.35rem 0.6rem;
+  border-radius: 8px;
+  border: 1px dashed var(--border);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: color-mix(in srgb, currentColor 70%, transparent);
+}
+
+.chat-tool--running {
+  font-style: italic;
+}
+
+.chat-tool--error {
+  border-color: #d04545;
+  color: #d04545;
+}
+
+.chat-tool-icon {
+  flex: none;
+}
+
+.chat-tool-summary {
+  word-break: break-word;
+}
+
 .chat-input-row {
   display: flex;
   gap: 0.4rem;

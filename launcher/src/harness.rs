@@ -146,7 +146,10 @@ impl Harness {
             .call_async(&mut store, (ctx_ptr, ctx_len))
             .await
             .map_err(|e| format!("harness run trapped: {e}"))?;
-        dealloc.call_async(&mut store, (ctx_ptr, ctx_len)).await.ok();
+        dealloc
+            .call_async(&mut store, (ctx_ptr, ctx_len))
+            .await
+            .ok();
 
         let out_ptr = (packed >> 32) as u32;
         let out_len = (packed & 0xffff_ffff) as u32;
@@ -165,7 +168,10 @@ impl Harness {
         memory
             .read(&store, out_ptr as usize, &mut out)
             .map_err(|e| format!("harness memory read failed: {e}"))?;
-        dealloc.call_async(&mut store, (out_ptr, out_len)).await.ok();
+        dealloc
+            .call_async(&mut store, (out_ptr, out_len))
+            .await
+            .ok();
         Ok(out)
     }
 }
@@ -230,7 +236,10 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), String> {
         .func_wrap(
             "host",
             "llm_read",
-            |mut caller: Caller<'_, HostState>, out_ptr: u32, out_len: u32| -> wasmtime::Result<()> {
+            |mut caller: Caller<'_, HostState>,
+             out_ptr: u32,
+             out_len: u32|
+             -> wasmtime::Result<()> {
                 let reply = std::mem::take(&mut caller.data_mut().reply);
                 let memory = caller
                     .get_export("memory")
@@ -255,7 +264,9 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), String> {
 /// (shared with the rest of the launcher); here we only enforce the guest→host
 /// UTF-8 boundary before handing the bytes off.
 async fn host_generate(upstream: &str, request_body: &[u8]) -> Result<String, ()> {
-    let body = std::str::from_utf8(request_body).map_err(|_| ())?.to_string();
+    let body = std::str::from_utf8(request_body)
+        .map_err(|_| ())?
+        .to_string();
     crate::upstream::chat_completion(upstream, body).await
 }
 
@@ -295,7 +306,10 @@ pub fn init(dev: bool, slot: Arc<HarnessSlot>) {
         match load_source(dev).await {
             Ok(Some((wasm, sig))) => match Harness::new(&wasm, &sig) {
                 Ok(harness) => {
-                    println!("harness: loaded and signature-verified ({} bytes)", wasm.len());
+                    println!(
+                        "harness: loaded and signature-verified ({} bytes)",
+                        wasm.len()
+                    );
                     slot.set(Arc::new(harness));
                 }
                 // A signature failure is fatal-by-design for this boot: /chat
@@ -317,11 +331,10 @@ pub fn init(dev: bool, slot: Arc<HarnessSlot>) {
 async fn load_source(dev: bool) -> Result<Option<(Vec<u8>, Vec<u8>)>, String> {
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     if let Some(path) = env("HARNESS_PATH") {
-        let sig_path = env("HARNESS_SIG_PATH")
-            .ok_or("HARNESS_PATH is set but HARNESS_SIG_PATH is not")?;
+        let sig_path =
+            env("HARNESS_SIG_PATH").ok_or("HARNESS_PATH is set but HARNESS_SIG_PATH is not")?;
         let wasm = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
-        let sig =
-            std::fs::read(&sig_path).map_err(|e| format!("cannot read {sig_path}: {e}"))?;
+        let sig = std::fs::read(&sig_path).map_err(|e| format!("cannot read {sig_path}: {e}"))?;
         return Ok(Some((wasm, sig)));
     }
     // The pipeline path resolves + retries internally; it logs the cause of any
@@ -408,7 +421,10 @@ mod tests {
         let sig = sign_with_demo_key(wat);
 
         let harness = Harness::new(wat, &sig).expect("signature should pass");
-        let err = harness.run("127.0.0.1:1", b"{\"messages\":[]}").await.unwrap_err();
+        let err = harness
+            .run("127.0.0.1:1", b"{\"messages\":[]}")
+            .await
+            .unwrap_err();
         assert!(
             err.contains("instantiate"),
             "expected an instantiation failure, got: {err}"
@@ -416,11 +432,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reply_comes_from_the_harness_prompt_orchestration() {
-        let upstream = mock_llama(true).await;
+    async fn first_turn_emits_a_search_tool_call() {
+        // A fresh user message makes the harness ask the client to retrieve
+        // relevant entries before it touches the model (data minimization). No
+        // upstream is needed: the model isn't called on this leg.
         let harness = Harness::new(&fixture_wasm(), &fixture_sig()).unwrap();
         let context = serde_json::json!({
             "messages": [{ "role": "user", "content": "how was my week?" }]
+        })
+        .to_string();
+
+        let out = harness
+            .run("127.0.0.1:1", context.as_bytes())
+            .await
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let call = &reply["tool_calls"][0];
+        assert_eq!(call["name"], "search_entries");
+        assert_eq!(call["arguments"]["query"], "how was my week?");
+    }
+
+    #[tokio::test]
+    async fn reply_comes_from_the_harness_prompt_orchestration() {
+        let upstream = mock_llama(true).await;
+        let harness = Harness::new(&fixture_wasm(), &fixture_sig()).unwrap();
+        // tool_results present → the harness builds the prompt and calls the
+        // model (the "answer" leg of the loop).
+        let context = serde_json::json!({
+            "messages": [{ "role": "user", "content": "how was my week?" }],
+            "tool_results": [{ "id": "search-1", "name": "search_entries", "result": { "matches": [] } }],
         })
         .to_string();
 
@@ -432,19 +472,50 @@ mod tests {
             text.contains("system: You are a private journaling assistant"),
             "harness prompt not applied: {text}"
         );
-        assert!(text.contains("user: how was my week?"), "history dropped: {text}");
+        assert!(
+            text.contains("user: how was my week?"),
+            "history dropped: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieved_entries_ground_the_reply() {
+        // The matched entries the client fed back ride into the prompt so the
+        // model can use them.
+        let upstream = mock_llama(true).await;
+        let harness = Harness::new(&fixture_wasm(), &fixture_sig()).unwrap();
+        let context = serde_json::json!({
+            "messages": [{ "role": "user", "content": "what did I do?" }],
+            "tool_results": [{
+                "id": "search-1",
+                "name": "search_entries",
+                "result": { "matches": [
+                    { "id": "e1", "title": "Monday", "body": "started a new job", "createdAt": "2026-06-01" }
+                ] },
+            }],
+        })
+        .to_string();
+
+        let out = harness.run(&upstream, context.as_bytes()).await.unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let text = reply["reply"].as_str().unwrap();
+        assert!(
+            text.contains("started a new job"),
+            "grounding dropped: {text}"
+        );
     }
 
     #[tokio::test]
     async fn upstream_failure_yields_an_empty_reply_not_a_leak() {
         // Unreachable upstream → host_generate errs → guest returns 0 → run
-        // surfaces an error carrying no plaintext.
+        // surfaces an error carrying no plaintext. tool_results present so the
+        // harness reaches the model call.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
         drop(listener);
 
         let harness = Harness::new(&fixture_wasm(), &fixture_sig()).unwrap();
-        let context = br#"{"messages":[{"role":"user","content":"secret-journal-text"}]}"#;
+        let context = br#"{"messages":[{"role":"user","content":"secret-journal-text"}],"tool_results":[{"id":"search-1","name":"search_entries","result":{"matches":[]}}]}"#;
         let err = harness.run(&upstream, context).await.unwrap_err();
         assert!(err.contains("no reply"), "unexpected error: {err}");
         assert!(!err.contains("secret-journal"), "plaintext leaked: {err}");

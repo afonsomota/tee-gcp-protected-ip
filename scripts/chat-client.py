@@ -16,6 +16,13 @@ ephemeral key. Conversation state lives only here on the client; every
 request carries the full history. Useful for exercising a deployed enclave
 (or a local launcher) without the browser.
 
+The enclave may answer with client-side tool calls (issue #10) instead of a
+reply — e.g. `search_entries` over the user's local journal. This CLI has no
+local journal, so it runs those tools as no-ops (empty results) and feeds the
+results back until the harness produces a reply; it prints each tool the
+enclave asked for so the loop is visible. Use the browser frontend for the
+real, journal-backed tool flow.
+
 NOTE: unlike the frontend, this script does NOT verify the attestation
 token before trusting the key — pair it with verify-attestation.py when
 talking to a real enclave.
@@ -45,17 +52,39 @@ SUITE = CipherSuite.new(
 )
 
 
-def chat(base: str, enclave_pub: KEMKey, messages: list[dict[str, str]]) -> str:
-    """Seal the full history to the enclave, return the decrypted reply."""
+MAX_TOOL_ROUNDS = 4
+
+
+def run_tool(call: dict) -> object:
+    """Execute one client-side tool call. This CLI has no local journal, so
+    `search_entries` matches nothing and `attach_metadata` is a no-op; the
+    enclave's harness handles empty results gracefully."""
+    name = call.get("name")
+    if name == "search_entries":
+        return {"matches": [], "count": 0}
+    if name == "attach_metadata":
+        return {"ok": False, "error": "chat-client.py has no local journal"}
+    raise SystemExit(f"enclave requested an unknown tool: {name!r}")
+
+
+def _send_turn(
+    base: str,
+    enclave_pub: KEMKey,
+    messages: list[dict[str, str]],
+    tool_results: list[dict] | None,
+) -> dict:
+    """One /chat round-trip: seal the history (+ any tool results), return the
+    decrypted harness turn ({"reply": ...} or {"tool_calls": [...]})."""
     reply_key = X25519PrivateKey.generate()
-    request = json.dumps(
-        {
-            "messages": messages,
-            "reply_pub": base64.b64encode(
-                reply_key.public_key().public_bytes_raw()
-            ).decode(),
-        }
-    ).encode()
+    payload: dict[str, object] = {
+        "messages": messages,
+        "reply_pub": base64.b64encode(
+            reply_key.public_key().public_bytes_raw()
+        ).decode(),
+    }
+    if tool_results:
+        payload["tool_results"] = tool_results
+    request = json.dumps(payload).encode()
     enc, sender = SUITE.create_sender_context(enclave_pub, info=REQUEST_INFO)
     envelope = {
         "enc": base64.b64encode(enc).decode(),
@@ -72,8 +101,28 @@ def chat(base: str, enclave_pub: KEMKey, messages: list[dict[str, str]]) -> str:
         KEMKey.from_pyca_cryptography_key(reply_key),
         info=RESPONSE_INFO,
     )
-    reply = json.loads(recipient.open(base64.b64decode(body["ct"])))
-    return reply["reply"]
+    return json.loads(recipient.open(base64.b64decode(body["ct"])))
+
+
+def chat(base: str, enclave_pub: KEMKey, messages: list[dict[str, str]]) -> str:
+    """Run a full turn: send the history and, while the enclave asks for tools,
+    run them locally and feed the results back, until it returns a reply."""
+    tool_results: list[dict] | None = None
+    for _ in range(MAX_TOOL_ROUNDS + 1):
+        turn = _send_turn(base, enclave_pub, messages, tool_results)
+        if "reply" in turn:
+            return turn["reply"]
+        calls = turn.get("tool_calls") or []
+        if not calls:
+            raise SystemExit("enclave returned neither a reply nor tool calls")
+        tool_results = []
+        for call in calls:
+            args = call.get("arguments", {})
+            print(f"  [enclave tool: {call.get('name')} {json.dumps(args)}]", file=sys.stderr)
+            tool_results.append(
+                {"id": call.get("id"), "name": call.get("name"), "result": run_tool(call)}
+            )
+    raise SystemExit(f"enclave tool loop exceeded {MAX_TOOL_ROUNDS} rounds")
 
 
 def main() -> None:

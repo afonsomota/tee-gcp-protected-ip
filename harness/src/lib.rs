@@ -26,6 +26,28 @@
 //!         Copies the stashed reply into guest memory. Splitting generate
 //!         (length) from read (copy) avoids re-entrant host→guest `alloc`
 //!         calls, which wasmtime forbids mid-call.
+//!
+//! # Tool loop (issue #10)
+//!
+//! The reply JSON is now one of two shapes:
+//!   * `{"reply": "<text>"}`                          — final answer
+//!   * `{"tool_calls": [{"id","name","arguments"}]}`  — run these client-side
+//!
+//! The context JSON the host hands in grows to carry the loop state (the
+//! launcher is stateless, so each turn replays everything):
+//!   * `messages`     — the user/assistant transcript, oldest first
+//!   * `tool_results` — results of the tool calls the harness asked for last
+//!                      turn (empty on the first turn of a user message)
+//!   * `tools`        — the launcher's tool manifest (informational; the
+//!                      launcher re-validates every call we emit against it)
+//!
+//! This module's policy is a deliberately simple stand-in for the closed
+//! "secret sauce": on a fresh user turn it retrieves the user's relevant
+//! entries via `search_entries` (the on-demand data-minimization flow — entries
+//! enter the enclave only when this tool pulls them), then on the next turn it
+//! answers grounded in whatever the client returned. A real harness would plan
+//! with the model; the *machinery* (manifest, validation, multi-turn routing)
+//! is what issue #10 builds.
 
 use serde::{Deserialize, Serialize};
 
@@ -56,12 +78,34 @@ struct Context {
     /// The conversation so far, oldest first, validated host-side to contain
     /// only `user`/`assistant` roles (the system prompt is ours, below).
     messages: Vec<Message>,
+    /// Results of the tool calls we asked for on the previous turn. Empty on
+    /// the first turn of a user message; populated by the client once it has
+    /// executed our `search_entries`/`attach_metadata` requests.
+    #[serde(default)]
+    tool_results: Vec<ToolResult>,
+    /// The launcher's manifest, handed in for reference. We don't enforce it —
+    /// the launcher does, re-validating every call below — so it's accepted but
+    /// otherwise unused here.
+    #[serde(default)]
+    #[allow(dead_code)]
+    tools: serde_json::Value,
 }
 
 #[derive(Deserialize, Serialize)]
 struct Message {
     role: String,
     content: String,
+}
+
+/// A tool result the client fed back: the call id, the tool name, and the
+/// tool's JSON output (shape is tool-specific — `search_entries` returns
+/// `{ "matches": [...] }`).
+#[derive(Deserialize)]
+struct ToolResult {
+    #[allow(dead_code)]
+    id: String,
+    name: String,
+    result: serde_json::Value,
 }
 
 /// Allocate `len` bytes and hand the raw pointer to the host. The boxed slice
@@ -80,7 +124,11 @@ pub extern "C" fn alloc(len: u32) -> u32 {
 /// `ptr`/`len` must come from a prior `alloc`/`run` and be freed at most once.
 #[no_mangle]
 pub unsafe extern "C" fn dealloc(ptr: u32, len: u32) {
-    drop(Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize));
+    drop(Vec::from_raw_parts(
+        ptr as *mut u8,
+        len as usize,
+        len as usize,
+    ));
 }
 
 /// Entry point: chat context in, reply JSON out (see module ABI docs).
@@ -103,28 +151,97 @@ pub unsafe extern "C" fn run(ctx_ptr: u32, ctx_len: u32) -> u64 {
     (ptr << 32) | len
 }
 
-/// The orchestration: parse the context, build the prompt (the secret sauce),
-/// ask the host's model, and wrap the reply. `None` on any failure.
+/// The orchestration (the secret sauce): parse the context and either request
+/// a tool call or, once the client has answered one, build the prompt and ask
+/// the model. `None` on any failure.
 fn orchestrate(ctx: &[u8]) -> Option<Vec<u8>> {
     let context: Context = serde_json::from_slice(ctx).ok()?;
 
-    // Prepend our system prompt to the client's history. This is the only
-    // place the prompt lives — it never leaves the sandbox in the clear.
-    let mut messages = Vec::with_capacity(context.messages.len() + 1);
-    messages.push(Message {
+    if context.tool_results.is_empty() {
+        // Fresh user turn: retrieve the entries relevant to it before answering.
+        // This is the data-minimization step — the only path that pulls entries
+        // into the enclave, and only the ones the client's search matches.
+        return retrieve(&context.messages);
+    }
+
+    // The client has executed our tool calls; answer grounded in the results.
+    answer(&context.messages, &context.tool_results)
+}
+
+/// Emit a `search_entries` call seeded from the latest user message. The
+/// launcher re-validates this against its manifest before it reaches the
+/// client.
+fn retrieve(messages: &[Message]) -> Option<Vec<u8>> {
+    let query = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")?
+        .content
+        .clone();
+    let call = serde_json::json!({
+        "id": "search-1",
+        "name": "search_entries",
+        "arguments": { "query": query, "limit": 5 },
+    });
+    serde_json::to_vec(&serde_json::json!({ "tool_calls": [call] })).ok()
+}
+
+/// Build the prompt — system + retrieved-entry context + the conversation —
+/// and return the model's reply. The retrieved entries ride as a system turn so
+/// they are clearly the assistant's grounding, not user input.
+fn answer(messages: &[Message], tool_results: &[ToolResult]) -> Option<Vec<u8>> {
+    let mut prompt = Vec::with_capacity(messages.len() + 2);
+    prompt.push(Message {
         role: "system".to_string(),
         // `trim` drops the trailing newline editors leave in the .md file.
         content: prompts::SYSTEM.trim().to_string(),
     });
-    messages.extend(context.messages);
+    if let Some(context) = format_retrieved(tool_results) {
+        prompt.push(Message {
+            role: "system".to_string(),
+            content: context,
+        });
+    }
+    prompt.extend(messages.iter().map(|m| Message {
+        role: m.role.clone(),
+        content: m.content.clone(),
+    }));
 
     let request = serde_json::json!({
-        "messages": messages,
+        "messages": prompt,
         "max_tokens": MAX_TOKENS,
     });
     let reply = call_model(&serde_json::to_vec(&request).ok()?)?;
 
     serde_json::to_vec(&serde_json::json!({ "reply": reply })).ok()
+}
+
+/// Render the `search_entries` matches the client returned into a grounding
+/// block for the prompt. Returns `None` when nothing relevant came back.
+fn format_retrieved(tool_results: &[ToolResult]) -> Option<String> {
+    let mut lines = Vec::new();
+    for tr in tool_results {
+        if tr.name != "search_entries" {
+            continue;
+        }
+        let matches = tr.result.get("matches").and_then(|m| m.as_array());
+        for entry in matches.into_iter().flatten() {
+            let title = entry.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let body = entry.get("body").and_then(|v| v.as_str()).unwrap_or("");
+            let date = entry
+                .get("createdAt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            lines.push(format!("- ({date}) {title}: {body}"));
+        }
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "The user's relevant journal entries (use them to answer; do not invent others):\n{}",
+        lines.join("\n")
+    ))
 }
 
 /// Two-step host call: `llm_generate` returns the reply length (or -1), then

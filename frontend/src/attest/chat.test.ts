@@ -49,4 +49,19 @@ describe("chat request payload matches the launcher wire format", () => {
     expect(CHAT_REQUEST_INFO).toBe("tee-example/hpke/chat/request/v1");
     expect(CHAT_RESPONSE_INFO).toBe("tee-example/hpke/chat/response/v1");
   });
+
+  it("omits tool_results on a fresh turn but includes them once present", () => {
+    // serde's `#[serde(default)]` accepts the field's absence, so a first turn
+    // stays { messages, reply_pub }; a follow-up adds the matching loop state.
+    const fresh = JSON.parse(buildChatPayload(history, replyPub)) as Record<string, unknown>;
+    expect("tool_results" in fresh).toBe(false);
+
+    const results = [{ id: "search-1", name: "search_entries", result: { matches: [] } }];
+    const followUp = JSON.parse(buildChatPayload(history, replyPub, results)) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(followUp).sort()).toEqual(["messages", "reply_pub", "tool_results"]);
+    expect(followUp.tool_results).toEqual(results);
+  });
 });
