@@ -60,15 +60,21 @@ resource "google_project_service" "apis" {
     "compute.googleapis.com",
     "confidentialcomputing.googleapis.com",
     "artifactregistry.googleapis.com",
+    # Service-account management: the main root creates the workload SA;
+    # also needed to manage the workload identity pool + release SA that
+    # the release workflow's registry push authenticates through.
+    "iam.googleapis.com",
     # Mints workload-identity-federation access tokens; without it the
     # release workflow's registry push fails at the GCP auth step.
     "iamcredentials.googleapis.com",
-    # Attestation-gated artifact delivery (issue 007): KMS wraps the
-    # artifact DEKs, IAM hosts the workload identity pool, STS exchanges
-    # the enclave's attestation JWT for the pool principal's access token.
-    "cloudkms.googleapis.com",
-    "iam.googleapis.com",
+    # Exchanges OIDC tokens for GCP credentials: the GitHub OIDC token for the
+    # release workflow's WIF auth, and the enclave's attestation JWT for the
+    # pool principal's access token in attestation-gated artifact delivery.
     "sts.googleapis.com",
+    # Attestation-gated artifact delivery (issue 007): KMS wraps the artifact
+    # DEKs, the workload identity pool (IAM, above) hosts the verifier, GCS
+    # stores the ciphertext blobs.
+    "cloudkms.googleapis.com",
     "storage.googleapis.com",
   ])
   service            = each.value
@@ -128,6 +134,10 @@ resource "google_compute_address" "cvm" {
   name       = "tee-example-cvm"
   region     = var.region # must match the region the CVM is deployed in
   depends_on = [google_project_service.apis]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---- Attestation-gated artifact delivery (issue 007) -----------------------
@@ -227,7 +237,8 @@ output "repository_url" {
 }
 
 output "cvm_ip" {
-  value = google_compute_address.cvm.address
+  description = "Static IP: point the API domain's A record here"
+  value       = google_compute_address.cvm.address
 }
 
 output "artifacts_bucket" {

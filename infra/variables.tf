@@ -97,3 +97,38 @@ variable "deployment_suffix" {
     error_message = "deployment_suffix must be \"\" (prod) or 2-23 chars of [a-z0-9-], starting with a letter and ending with a letter or digit."
   }
 }
+
+# ---- TLS / ACME (issue 004) ------------------------------------------------
+
+variable "tls_domain" {
+  description = <<-EOT
+    Domain the enclave serves HTTPS for (e.g. api.example.com). Empty
+    disables TLS (plain HTTP on http_port, as before). Requires the
+    bootstrap root applied and an A record pointing the domain at its
+    static IP (output `cvm_ip`).
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "acme_contact" {
+  description = "Contact email for the Let's Encrypt account (required when tls_domain is set)"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.tls_domain == "" || var.acme_contact != ""
+    error_message = "acme_contact is required when tls_domain is set."
+  }
+}
+
+variable "acme_directory" {
+  description = "ACME directory: letsencrypt-staging (default, no rate-limit risk) or letsencrypt for real certs"
+  type        = string
+  default     = "letsencrypt-staging"
+
+  validation {
+    condition     = contains(["letsencrypt", "letsencrypt-staging"], var.acme_directory) || startswith(var.acme_directory, "https://")
+    error_message = "acme_directory must be letsencrypt, letsencrypt-staging, or an https:// directory URL."
+  }
+}

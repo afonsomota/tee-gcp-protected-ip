@@ -92,7 +92,7 @@ Instead of Terraform you can run the equivalent gcloud one-liners — plus the
 state bucket, which the `infra/` root still needs:
 
 ```sh
-gcloud services enable compute.googleapis.com confidentialcomputing.googleapis.com artifactregistry.googleapis.com iamcredentials.googleapis.com
+gcloud services enable compute.googleapis.com confidentialcomputing.googleapis.com artifactregistry.googleapis.com iam.googleapis.com iamcredentials.googleapis.com sts.googleapis.com
 gcloud artifacts repositories create tee-example --repository-format=docker --location=europe-west4
 gcloud compute addresses create tee-example-cvm --region=europe-west4
 gcloud storage buckets create gs://YOUR_PROJECT_ID-tfstate --location=europe-west4 \
@@ -300,6 +300,57 @@ trusting the enclave key — pair it with `verify-attestation.py`.
 Debugging tips: set `-var confidential_space_image_family=confidential-space-debug`
 to get an SSH-able debug image, and check serial port 1 / Cloud Logging for
 container logs (`tee-container-log-redirect=true` is set).
+
+## TLS terminated inside the enclave (issue 004)
+
+With `-var tls_domain=api.YOUR_DOMAIN` the launcher serves HTTPS directly:
+rustls-acme obtains a Let's Encrypt certificate over TLS-ALPN-01 (port 443
+only, no port 80, no LB). Nothing persists: every boot registers a fresh
+ACME account and orders a fresh certificate, both living only in enclave
+memory (`launcher/src/acme_cache.rs` has the rationale). Only the static IP
+is long-lived (in `infra/bootstrap/`), so DNS stays valid across
+destroy/apply cycles.
+
+One-time DNS setup, after applying the bootstrap root:
+
+```sh
+terraform -chdir=infra/bootstrap output -raw cvm_ip
+# Create an A record at your DNS provider:
+#   api.YOUR_DOMAIN.  A  <cvm_ip>     (TTL ~300)
+```
+
+Deploy with TLS:
+
+```sh
+terraform -chdir=infra apply \
+  -var project_id=YOUR_PROJECT_ID \
+  -var image_digest=$DIGEST \
+  -var tls_domain=api.YOUR_DOMAIN \
+  -var acme_contact=you@example.com \
+  -var acme_directory=letsencrypt-staging   # switch to letsencrypt once the flow is proven
+
+curl -v "https://api.YOUR_DOMAIN/echo?msg=hello"   # staging cert: add --insecure
+./scripts/verify-attestation.py --url "https://api.YOUR_DOMAIN" --image-digest "$DIGEST"
+```
+
+Notes:
+
+- **Staging first.** The default ACME directory is Let's Encrypt staging:
+  certs chain to untrusted test roots (`curl --insecure` to inspect), but
+  issuance is effectively unlimited (30,000 certs/week per domain), so
+  destroy/apply cycles cost nothing. Only set
+  `-var acme_directory=letsencrypt` for a live demo with a browser-trusted
+  cert. Production limits that matter here, since every boot is a fresh
+  issuance: **5 certs per exact identifier set per 7 days** (refills 1 per
+  ~34 h) and 50 per registered domain per 7 days — fine for occasional
+  demos, not for tight redeploy loops. New-account registration (also fresh
+  per boot) allows 10 per IP per 3 hours.
+- **Cert/key binding.** The attestation token's `tls:` eat_nonce is the
+  SHA-256 of the serving certificate key's SubjectPublicKeyInfo DER.
+  `verify-attestation.py` checks this automatically when given an `https://`
+  URL (it fetches the served certificate and compares the hashes, retrying
+  once on mismatch to ride out a renewal rebind). Manual cross-check:
+  `openssl s_client -connect api.YOUR_DOMAIN:443 | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | sha256sum`.
 
 ## Inference footprint & boot time
 

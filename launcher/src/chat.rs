@@ -485,7 +485,11 @@ mod tests {
         assert_eq!(info, expected_info, "info string mismatch in {path:?}");
         let plaintext = open(&sk, &b64_field("enc"), &info, &b64_field("ct"))
             .unwrap_or_else(|e| panic!("failed to open {path:?}: {e}"));
-        assert_eq!(plaintext, b64_field("plaintext"), "plaintext mismatch in {path:?}");
+        assert_eq!(
+            plaintext,
+            b64_field("plaintext"),
+            "plaintext mismatch in {path:?}"
+        );
     }
 
     #[test]

@@ -49,6 +49,20 @@ locals {
   # dev deployments in the workspace named after their suffix.
   expected_workspace = local.is_prod ? "default" : var.deployment_suffix
 
+  tls_enabled = var.tls_domain != ""
+
+  # TLS config travels as plain instance metadata attributes (read via the
+  # metadata server by launcher/src/tls.rs), NOT as tee-env-* launch-policy
+  # overrides: the release image deliberately omits
+  # tee.launch_policy.allow_env_override, so the operator cannot inject
+  # environment into the audited workload. Same delivery channel as the
+  # weights config below.
+  tls_metadata = local.tls_enabled ? {
+    tls-domain     = var.tls_domain
+    acme-contact   = var.acme_contact
+    acme-directory = var.acme_directory
+  } : {}
+
   # ---- Attestation-gated weights delivery (issue #7) ------------------------
   weights_enabled = var.weights_object != null && var.weights_object != ""
 
@@ -175,7 +189,11 @@ resource "google_compute_firewall" "allow_http" {
 
   allow {
     protocol = "tcp"
-    ports    = [tostring(var.http_port)]
+    # The launcher binds either plain HTTP or HTTPS, never both (main.rs):
+    # open only the port that is actually listening. 443 is fixed — the
+    # TLS-ALPN-01 challenge validates on 443 only, and HTTPS_PORT is an
+    # env-only dev/test knob that production never sets.
+    ports = local.tls_enabled ? ["443"] : [tostring(var.http_port)]
   }
 
   source_ranges = ["0.0.0.0/0"]
@@ -229,6 +247,7 @@ resource "google_compute_instance" "cvm" {
       tee-image-reference        = local.image_reference
       tee-container-log-redirect = "true"
     },
+    local.tls_metadata,
     local.weights_metadata,
   )
 
@@ -249,6 +268,14 @@ resource "google_compute_instance" "cvm" {
     precondition {
       condition     = terraform.workspace == local.expected_workspace
       error_message = "deployment_suffix \"${var.deployment_suffix}\" belongs in workspace \"${local.expected_workspace}\", but \"${terraform.workspace}\" is selected. Run `terraform -chdir=infra workspace select ${local.expected_workspace}` (or use make deploy / make dev-deploy)."
+    }
+
+    # TLS needs the domain's A record to resolve to this VM, and only prod
+    # gets the bootstrap static IP the record points at. A dev deployment
+    # takes an ephemeral IP, so ACME validation could never succeed there.
+    precondition {
+      condition     = local.is_prod || !local.tls_enabled
+      error_message = "tls_domain is prod-only: a dev deployment (deployment_suffix set) gets an ephemeral IP, so the domain's A record cannot reach it and ACME validation would always fail."
     }
   }
 }

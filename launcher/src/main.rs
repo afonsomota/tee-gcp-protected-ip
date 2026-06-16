@@ -2,12 +2,14 @@
 //! attestation-token endpoint. This is the seed of the audited TCB described
 //! in docs/DESIGN.md.
 
+mod acme_cache;
 mod artifacts;
 mod chat;
 mod gcp;
 mod hpke_channel;
 mod keys;
 mod llama;
+mod tls;
 mod upstream;
 
 use std::sync::Arc;
@@ -77,6 +79,22 @@ async fn main() {
     );
     if dev {
         println!("DEV MODE: /attestation serves an UNSIGNED, UNVERIFIED token");
+        if std::env::var("TLS_DOMAIN").is_ok_and(|d| !d.is_empty()) {
+            println!("DEV MODE: ignoring TLS_DOMAIN, serving plain HTTP");
+        }
+    }
+    // TLS (issue 004): enabled outside dev mode by the `tls-domain` instance
+    // metadata attribute (or TLS_DOMAIN as a dev/test override); see tls.rs.
+    let tls_config = if dev {
+        None
+    } else {
+        tls::TlsConfig::resolve()
+            .await
+            .expect("invalid TLS configuration")
+    };
+    if let Some(tls_config) = tls_config {
+        tls::serve(state, tls_config).await;
+        return;
     }
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await

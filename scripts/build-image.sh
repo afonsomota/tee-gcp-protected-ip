@@ -37,8 +37,10 @@ cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
 DIST="$REPO_ROOT/dist"
 
-# ---- pinned inputs (recipe version 3) --------------------------------------
-RECIPE_VERSION=3
+# ---- pinned inputs (recipe version 4) --------------------------------------
+# v4: expose 8080/443 on the image so Confidential Space keeps the port open
+# (issue 004 TLS would otherwise be unreachable; see crane mutate below).
+RECIPE_VERSION=4
 # rust:1.88.0-alpine3.22, linux/amd64 platform image (not the multi-arch index)
 RUST_IMAGE="rust@sha256:64eba3726734dcfe89e0a62a0485007a3ab7c7372ce5b38c621d8812f70215f0"
 RUST_IMAGE_HUMAN="rust:1.88.0-alpine3.22 (linux/amd64)"
@@ -147,10 +149,17 @@ for _ in $(seq 1 50); do curl -fsS "http://$REG/v2/" >/dev/null 2>&1 && break; s
 # allow_mount_destinations=/models lets the operator attach the tee-mount
 # tmpfs that artifact delivery (issue 007) decrypts the weights into —
 # plaintext weights only ever exist in SEV-SNP-encrypted guest memory.
+# Exposed ports must be set on the IMAGE: Confidential Space (image >= 230600)
+# keeps every inbound port closed at the VM unless the image exposes it, so a
+# Dockerfile EXPOSE on the dev-only buildx path is not enough — this crane
+# build is the real release image. 8080 = plain HTTP, 443 = TLS terminated
+# in-enclave (issue 004); the launcher binds exactly one per boot. The GCP
+# firewall (infra/main.tf) is the external gate for which is actually reachable.
 "$CRANE" mutate "$REG/launcher:rc" \
   --set-platform linux/amd64 \
   --entrypoint /launcher \
   --env LLAMA_ARG_HOST=127.0.0.1 \
+  --exposed-ports 8080/tcp,443/tcp \
   --label tee.launch_policy.log_redirect=always \
   --label tee.launch_policy.allow_mount_destinations=/models \
   -t "$REG/launcher:release" >/dev/null

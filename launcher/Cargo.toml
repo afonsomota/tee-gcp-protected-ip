@@ -11,6 +11,10 @@ serde_json = "1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "webpki-roots", "ring", "tls12"] }
+# rustls is pulled in by both hyper-rustls (the metadata-server HTTPS client,
+# issue 007) and rustls-acme (issue 004); neither selects tls12. This explicit
+# entry adds tls12 so TLS-1.2-only clients can still connect, and pins the
+# provider to ring (never the default aws-lc-rs).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 http-body-util = "0.1"
 bytes = "1"
@@ -22,6 +26,11 @@ rcgen = "0.14.8"
 base64 = "0.22.1"
 tower-http = { version = "0.6.11", features = ["cors"] }
 rand = "0.9"
+rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tokio", "axum", "webpki-roots"] }
+axum-server = "0.8"
+async-trait = "0.1"
+futures-util = { version = "0.3", default-features = false }
+pem = "3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
