@@ -24,7 +24,6 @@
 //! which wasmtime forbids mid-call.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use ed25519_dalek::{Signature, VerifyingKey};
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
@@ -37,10 +36,6 @@ const COMPANY_PUBLIC_KEY: [u8; 32] = [
     0x0f, 0x88, 0x4e, 0x99, 0xc6, 0x05, 0x7d, 0xf0, 0x3f, 0x18, 0x91, 0x03, 0xec, 0x6d, 0x97, 0xbe,
     0xff, 0x5c, 0xd8, 0x29, 0x1a, 0x08, 0xd7, 0x75, 0xe6, 0xb6, 0x33, 0xef, 0xa7, 0x9b, 0xd7, 0x66,
 ];
-
-/// CPU inference is slow; give a long-prompt completion room to finish. (Same
-/// budget the pre-harness `/chat` used.)
-const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Cap on the guest's linear memory. The harness only shuffles small JSON, so
 /// a generous cap still bounds a buggy/hostile module's RAM growth (the guest
@@ -249,48 +244,13 @@ fn link_host_functions(linker: &mut Linker<HostState>) -> Result<(), String> {
     Ok(())
 }
 
-/// One OpenAI-style completion against llama-server. The request body is built
-/// *by the harness* (the system prompt is now the harness's, not ours); we
-/// only transport it and pull out the reply text.
-///
-/// Mirrors the no-leak invariant from the old `chat::complete`: llama-server
-/// error bodies can echo prompt fragments, so on any failure we log and return
-/// status/length only — never the body, never decrypted content.
+/// Transport the guest-built request body to the enclave-local model. The
+/// no-leak transport + JSON extraction live in `crate::upstream::chat_completion`
+/// (shared with the rest of the launcher); here we only enforce the guest→host
+/// UTF-8 boundary before handing the bytes off.
 async fn host_generate(upstream: &str, request_body: &[u8]) -> Result<String, ()> {
     let body = std::str::from_utf8(request_body).map_err(|_| ())?.to_string();
-    let (status, response) = match tokio::time::timeout(
-        UPSTREAM_TIMEOUT,
-        crate::upstream::request(
-            upstream,
-            hyper::Method::POST,
-            "/v1/chat/completions",
-            Some(body),
-        ),
-    )
-    .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            eprintln!("harness/llm_generate: upstream unreachable: {e}");
-            return Err(());
-        }
-        Err(_) => {
-            eprintln!("harness/llm_generate: inference timed out after {UPSTREAM_TIMEOUT:?}");
-            return Err(());
-        }
-    };
-    if !status.is_success() {
-        eprintln!(
-            "harness/llm_generate: upstream returned {status} ({}-byte body withheld)",
-            response.len()
-        );
-        return Err(());
-    }
-    let completion: serde_json::Value = serde_json::from_slice(&response).map_err(|_| ())?;
-    completion["choices"][0]["message"]["content"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or(())
+    crate::upstream::chat_completion(upstream, body).await
 }
 
 /// A slot the `/chat` handler reads each request. Harness delivery (signed +
@@ -337,7 +297,9 @@ pub fn init(dev: bool, slot: Arc<HarnessSlot>) {
                 Err(e) => eprintln!("harness: rejected ({e}); /chat will serve 503"),
             },
             Ok(None) => {
-                println!("harness: not configured (set HARNESS_PATH or harness-object); /chat will serve 503")
+                // Either unconfigured, or every delivery attempt failed — the
+                // pipeline already logged which (and any per-attempt cause).
+                println!("harness: not delivered (unconfigured, or delivery failed after retries); /chat will serve 503")
             }
             Err(e) => eprintln!("harness: delivery failed ({e}); /chat will serve 503"),
         }
@@ -356,7 +318,9 @@ async fn load_source(dev: bool) -> Result<Option<(Vec<u8>, Vec<u8>)>, String> {
             std::fs::read(&sig_path).map_err(|e| format!("cannot read {sig_path}: {e}"))?;
         return Ok(Some((wasm, sig)));
     }
-    crate::artifacts::deliver_harness(dev).await
+    // The pipeline path resolves + retries internally; it logs the cause of any
+    // failure and folds "unconfigured" and "delivery exhausted" into `None`.
+    Ok(crate::artifacts::deliver_harness(dev).await)
 }
 
 #[cfg(test)]

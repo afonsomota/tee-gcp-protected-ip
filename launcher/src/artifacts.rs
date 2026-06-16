@@ -169,23 +169,46 @@ pub async fn init(dev: bool) -> Option<String> {
     );
     let upstream = crate::llama::planned_upstream();
     tokio::spawn(async move {
-        for attempt in 1..=FETCH_ATTEMPTS {
-            match deliver(&config).await {
-                Ok(path) => {
-                    crate::llama::start(path);
-                    return;
-                }
-                // Boot races IAM propagation (see FETCH_ATTEMPTS); the VM
-                // stays up either way — /chat keeps serving errors.
-                Err(e) => eprintln!("weights: attempt {attempt}/{FETCH_ATTEMPTS} failed: {e}"),
+        match deliver_with_retries(&WEIGHTS, || deliver(&config)).await {
+            Some(path) => {
+                crate::llama::start(path);
             }
-            if attempt < FETCH_ATTEMPTS {
-                tokio::time::sleep(RETRY_DELAY).await;
-            }
+            None => eprintln!("weights: giving up; /chat will keep failing"),
         }
-        eprintln!("weights: giving up; /chat will keep failing");
     });
     Some(upstream)
+}
+
+/// Run `deliver` up to `FETCH_ATTEMPTS` times with `RETRY_DELAY` backoff,
+/// returning the first success. Both artifacts share it so the harness gets the
+/// same KMS-IAM-propagation budget as the weights (see `FETCH_ATTEMPTS`) rather
+/// than the single shot it had before; the caller decides what to do with the
+/// delivered value (start llama vs. compile + verify the module) and how to
+/// report exhaustion. `None` = every attempt failed (each logged here); the VM
+/// stays up and `/chat` keeps serving errors until — for a transient cause — a
+/// later boot or retry lands.
+async fn deliver_with_retries<T, Fut>(
+    names: &ArtifactNames,
+    deliver: impl Fn() -> Fut,
+) -> Option<T>
+where
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    for attempt in 1..=FETCH_ATTEMPTS {
+        match deliver().await {
+            Ok(value) => return Some(value),
+            // Boot races IAM propagation (see FETCH_ATTEMPTS); a later attempt
+            // lands once the grant propagates.
+            Err(e) => eprintln!(
+                "{}: attempt {attempt}/{FETCH_ATTEMPTS} failed: {e}",
+                names.attr_prefix
+            ),
+        }
+        if attempt < FETCH_ATTEMPTS {
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
+    }
+    None
 }
 
 async fn resolve_with_retries(dev: bool, names: &ArtifactNames) -> Option<Config> {
@@ -269,19 +292,30 @@ async fn fetch_manifest_and_key(
 }
 
 /// Deliver the signed wasm harness (issue #8) over the same KMS-gated envelope
-/// pipeline as the weights. The artifact is small, so it is decrypted fully
-/// into guest memory (a `Vec`) — never to disk. Returns `(wasm, signature)`;
-/// the caller (`harness.rs`) verifies the detached Ed25519 signature against
-/// the pinned company key before instantiating. `Ok(None)` = not configured.
-pub async fn deliver_harness(dev: bool) -> Result<Option<(Vec<u8>, Vec<u8>)>, String> {
-    let Some(config) = Config::resolve(dev, &HARNESS).await? else {
-        return Ok(None);
-    };
+/// pipeline as the weights, with the same resolve + fetch retry budget so a
+/// cold-boot race with KMS-IAM propagation no longer leaves `/chat` permanently
+/// at 503. The artifact is small, so it is decrypted fully into guest memory (a
+/// `Vec`) — never to disk. Returns `(wasm, signature)`; the caller
+/// (`harness.rs`) verifies the detached Ed25519 signature against the pinned
+/// company key before instantiating. `None` = not configured, or every
+/// delivery attempt failed (each logged).
+pub async fn deliver_harness(dev: bool) -> Option<(Vec<u8>, Vec<u8>)> {
+    let config = resolve_with_retries(dev, &HARNESS).await?;
     println!(
         "harness: delivering gs://{}/{} (KMS {})",
         config.bucket, config.object, config.kms_key
     );
-    let (gcs_token, manifest, dek, nonce_prefix) = fetch_manifest_and_key(&config).await?;
+    deliver_with_retries(&HARNESS, || fetch_harness(&config)).await
+}
+
+/// One harness delivery attempt: fetch the manifest, unwrap its DEK as the
+/// attested principal, decrypt the wasm into memory, and check size + SHA-256.
+/// Retried by `deliver_with_retries` — only delivery/resolution transients are
+/// retried here; the *signature* check stays fatal-by-design in `Harness::new`,
+/// outside the retry loop, so a verified-bad module is never retried into
+/// oblivion.
+async fn fetch_harness(config: &Config) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let (gcs_token, manifest, dek, nonce_prefix) = fetch_manifest_and_key(config).await?;
 
     // The harness manifest must carry the signature; weights manifests do not.
     let signature = B64
@@ -295,7 +329,7 @@ pub async fn deliver_harness(dev: bool) -> Result<Option<(Vec<u8>, Vec<u8>)>, St
 
     let mut wasm = Vec::new();
     let (size, sha256) =
-        stream_into(&gcs_token, &config, &manifest, &dek, &nonce_prefix, &mut wasm).await?;
+        stream_into(&gcs_token, config, &manifest, &dek, &nonce_prefix, &mut wasm).await?;
     if size != manifest.plaintext_size || hex::encode(sha256) != manifest.plaintext_sha256 {
         return Err(format!(
             "decrypted harness does not match the manifest: got {size} bytes / sha256 {}, \
@@ -306,7 +340,7 @@ pub async fn deliver_harness(dev: bool) -> Result<Option<(Vec<u8>, Vec<u8>)>, St
         ));
     }
     println!("harness: decrypted {size} bytes (sha256 verified; signature checked on load)");
-    Ok(Some((wasm, signature)))
+    Ok((wasm, signature))
 }
 
 /// Fetch the manifest, unwrap the DEK as the attested principal, stream the
@@ -634,6 +668,47 @@ mod tests {
     fn rejects_bad_key_material() {
         assert!(EnvelopeDecryptor::new(&[0; 16], &[0; 7], 32, Vec::new()).is_err());
         assert!(EnvelopeDecryptor::new(&[0; 32], &[0; 12], 32, Vec::new()).is_err());
+    }
+
+    // ---- delivery retry scaffold (issue #8 fix) -------------------------
+    //
+    // The clock is paused (`start_paused`), so the RETRY_DELAY backoff between
+    // attempts advances instantly — these stay hermetic (no network, no real
+    // sleep). They guard the harness's new "retry like the weights" behaviour.
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[tokio::test(start_paused = true)]
+    async fn deliver_with_retries_recovers_after_transient_failures() {
+        let calls = AtomicU32::new(0);
+        // Fail the first two attempts (a stand-in for KMS-IAM propagation lag),
+        // succeed on the third — mirroring a cold-boot race that later clears.
+        let out = deliver_with_retries(&HARNESS, || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err(format!("transient {n}"))
+                } else {
+                    Ok::<u32, String>(42)
+                }
+            }
+        })
+        .await;
+        assert_eq!(out, Some(42));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deliver_with_retries_gives_up_after_the_budget() {
+        let calls = AtomicU32::new(0);
+        let out: Option<u32> = deliver_with_retries(&WEIGHTS, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<u32, String>("always failing".into()) }
+        })
+        .await;
+        assert_eq!(out, None);
+        // Exactly the budget — no more, no fewer.
+        assert_eq!(calls.load(Ordering::SeqCst), FETCH_ATTEMPTS);
     }
 
     #[test]
