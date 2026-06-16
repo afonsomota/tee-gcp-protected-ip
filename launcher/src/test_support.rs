@@ -53,3 +53,25 @@ pub async fn mock_llama(include_system: bool) -> String {
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     format!("127.0.0.1:{}", addr.port())
 }
+
+/// Spawn an OpenAI-shaped embeddings server on an ephemeral loopback port,
+/// returning its `host:port`. It returns a tiny fixed-length vector derived from
+/// the input length, which is enough to prove the `embed` enclave tool reached a
+/// model and threaded the vector through; the values are not meaningful.
+pub async fn mock_embeddings() -> String {
+    use axum::routing::post;
+    use axum::{Json, Router};
+
+    let embeddings = |Json(body): Json<serde_json::Value>| async move {
+        let input = body["input"].as_str().unwrap_or_default();
+        let n = input.len() as f64;
+        Json(serde_json::json!({
+            "data": [{ "embedding": [n, n + 1.0, n + 2.0] }]
+        }))
+    };
+    let app = Router::new().route("/v1/embeddings", post(embeddings));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("127.0.0.1:{}", addr.port())
+}

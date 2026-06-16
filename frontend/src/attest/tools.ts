@@ -17,8 +17,11 @@
  * (`launcher/src/tools.rs`); the launcher re-validates every call before it
  * reaches us.
  *
- * Vector similarity for `search_entries` arrives in issue #11; for now it is
- * keyword + metadata matching.
+ * `search_entries` ranks by vector similarity (issue #11) when the harness
+ * passes a `query_embedding` (produced by the enclave `embed` tool), blended
+ * with keyword/metadata matching; without one it is keyword-only. The stored
+ * embeddings never leave the device — only the matched entries' text does, and
+ * only the fields the assistant needs to ground its answer.
  */
 import type { JournalDb } from "../lib/store";
 import type { EntryEnrichment, JournalEntry } from "../lib/types";
@@ -44,13 +47,24 @@ export type ToolExecutor = (call: ToolCall) => Promise<ToolOutcome>;
 
 const DEFAULT_SEARCH_LIMIT = 5;
 
-/** What a matched entry looks like when it crosses to the enclave. */
+// How much vector similarity vs. keyword overlap each contribute to the blended
+// rank when a query embedding is present. Semantic recall leads; keywords break
+// ties and rescue entries that have no stored embedding yet.
+const SEMANTIC_WEIGHT = 0.7;
+const KEYWORD_WEIGHT = 0.3;
+
+/**
+ * What a matched entry looks like when it crosses to the enclave. The stored
+ * `embedding` is deliberately *not* included — it is for local ranking only and
+ * the assistant doesn't need it — so only the human-readable enrichment the
+ * model grounds on (emotions/situations/lifePhases/summary) leaves the device.
+ */
 interface MatchedEntry {
   id: string;
   title: string;
   body: string;
   createdAt: string;
-  enrichment?: EntryEnrichment;
+  enrichment?: Omit<EntryEnrichment, "embedding">;
 }
 
 /**
@@ -114,9 +128,20 @@ async function searchEntries(
 
   const all = await db.listEntries(key); // already newest-first
   const keywords = tokenize(query).filter((t) => !STOPWORDS.has(t));
+  const queryEmbedding = numberArray(args.query_embedding);
 
   let ranked: JournalEntry[];
-  if (keywords.length === 0) {
+  if (queryEmbedding !== undefined) {
+    // Semantic recall: rank by cosine similarity over stored embeddings,
+    // blended with keyword overlap. Falls back to most-recent if nothing scores
+    // (e.g. no entries have embeddings yet and no keyword matched).
+    const scored = all
+      .map((entry) => ({ entry, score: semanticScore(entry, queryEmbedding, keywords) }))
+      .filter((r) => r.score > 0)
+      .sort((a, b) => b.score - a.score || b.entry.createdAt.localeCompare(a.entry.createdAt))
+      .map((r) => r.entry);
+    ranked = scored.length > 0 ? scored : all;
+  } else if (keywords.length === 0) {
     // No usable keywords (e.g. an all-stopword question): fall back to the most
     // recent entries so the assistant still has grounding — still top-k, still
     // only these cross the channel.
@@ -129,18 +154,61 @@ async function searchEntries(
       .map((r) => r.entry);
   }
 
-  const matches: MatchedEntry[] = ranked.slice(0, limit).map((entry) => ({
-    id: entry.id,
-    title: entry.title,
-    body: entry.body,
-    createdAt: entry.createdAt,
-    ...(entry.enrichment !== undefined ? { enrichment: entry.enrichment } : {}),
-  }));
+  const matches: MatchedEntry[] = ranked.slice(0, limit).map(toMatch);
 
   return {
     result: { matches, count: matches.length },
     summary: summarizeSearch(query, matches),
   };
+}
+
+/** Project an entry to what crosses the channel, dropping the local-only embedding. */
+function toMatch(entry: JournalEntry): MatchedEntry {
+  const match: MatchedEntry = {
+    id: entry.id,
+    title: entry.title,
+    body: entry.body,
+    createdAt: entry.createdAt,
+  };
+  if (entry.enrichment !== undefined) {
+    const { embedding: _embedding, ...rest } = entry.enrichment;
+    if (Object.keys(rest).length > 0) match.enrichment = rest;
+  }
+  return match;
+}
+
+/**
+ * Blended rank for one entry against a query embedding: cosine similarity over
+ * the stored embedding (0 when the entry has none yet) plus the fraction of
+ * query keywords it matches, weighted. Both components sit in [0, 1].
+ */
+function semanticScore(entry: JournalEntry, queryEmbedding: number[], keywords: string[]): number {
+  const embedding = entry.enrichment?.embedding;
+  const semantic = embedding ? Math.max(0, cosineSimilarity(queryEmbedding, embedding)) : 0;
+  const keyword = keywords.length > 0 ? score(entry, keywords) / keywords.length : 0;
+  return SEMANTIC_WEIGHT * semantic + KEYWORD_WEIGHT * keyword;
+}
+
+/** Cosine similarity of two equal-length vectors; 0 for mismatched/zero vectors. */
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length === 0 || a.length !== b.length) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+/** A numeric array argument, or undefined if absent/wrongly typed. */
+function numberArray(value: unknown): number[] | undefined {
+  return Array.isArray(value) && value.every((x) => typeof x === "number")
+    ? (value as number[])
+    : undefined;
 }
 
 function score(entry: JournalEntry, keywords: string[]): number {

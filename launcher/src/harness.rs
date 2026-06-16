@@ -455,6 +455,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_turn_embeds_when_the_manifest_offers_it() {
+        // When the deployment advertises `embed`, the harness embeds the query
+        // (enclave) before searching, so the client can rank semantically. No
+        // upstream is touched on this leg.
+        let harness = Harness::new(&fixture_wasm(), &fixture_sig()).unwrap();
+        let context = serde_json::json!({
+            "task": "chat",
+            "messages": [{ "role": "user", "content": "how was my week?" }],
+            "tools": { "tools": [{ "name": "embed" }, { "name": "search_entries" }] },
+        })
+        .to_string();
+
+        let out = harness
+            .run("127.0.0.1:1", context.as_bytes())
+            .await
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let call = &reply["tool_calls"][0];
+        assert_eq!(call["name"], "embed");
+        assert_eq!(call["arguments"]["text"], "how was my week?");
+    }
+
+    #[tokio::test]
+    async fn embed_result_becomes_a_semantic_search() {
+        // Given the embedding back, the harness asks the client to search with
+        // it attached for semantic ranking.
+        let harness = Harness::new(&fixture_wasm(), &fixture_sig()).unwrap();
+        let context = serde_json::json!({
+            "task": "chat",
+            "messages": [{ "role": "user", "content": "how was my week?" }],
+            "tools": { "tools": [{ "name": "embed" }] },
+            "tool_results": [{ "id": "embed-1", "name": "embed", "result": { "embedding": [0.1, 0.2] } }],
+        })
+        .to_string();
+
+        let out = harness
+            .run("127.0.0.1:1", context.as_bytes())
+            .await
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let call = &reply["tool_calls"][0];
+        assert_eq!(call["name"], "search_entries");
+        assert_eq!(
+            call["arguments"]["query_embedding"],
+            serde_json::json!([0.1, 0.2])
+        );
+    }
+
+    #[tokio::test]
+    async fn enrich_first_turn_requests_the_enclave_batch() {
+        // On entry save, the harness asks for summarize + extract_metadata +
+        // embed (embed only when offered) as one enclave batch.
+        let harness = Harness::new(&fixture_wasm(), &fixture_sig()).unwrap();
+        let context = serde_json::json!({
+            "task": "enrich",
+            "entry": { "id": "e1", "title": "New job", "body": "first week" },
+            "tools": { "tools": [{ "name": "embed" }, { "name": "summarize" }, { "name": "extract_metadata" }] },
+        })
+        .to_string();
+
+        let out = harness
+            .run("127.0.0.1:1", context.as_bytes())
+            .await
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let names: Vec<&str> = reply["tool_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"summarize"));
+        assert!(names.contains(&"extract_metadata"));
+        assert!(names.contains(&"embed"));
+    }
+
+    #[tokio::test]
+    async fn enrich_folds_enclave_results_into_attach_metadata() {
+        // With the enclave outputs back, the harness assembles one enrichment
+        // object and asks the client to store it.
+        let harness = Harness::new(&fixture_wasm(), &fixture_sig()).unwrap();
+        let context = serde_json::json!({
+            "task": "enrich",
+            "entry": { "id": "e1", "title": "New job", "body": "first week" },
+            "tools": { "tools": [{ "name": "summarize" }, { "name": "extract_metadata" }] },
+            "tool_results": [
+                { "id": "summarize-e1", "name": "summarize", "result": { "summary": "Started a new job." } },
+                { "id": "extract-e1", "name": "extract_metadata", "result": { "emotions": ["nervous"], "situations": ["work"], "lifePhases": ["new job"] } },
+            ],
+        })
+        .to_string();
+
+        let out = harness
+            .run("127.0.0.1:1", context.as_bytes())
+            .await
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let call = &reply["tool_calls"][0];
+        assert_eq!(call["name"], "attach_metadata");
+        assert_eq!(call["arguments"]["entry_id"], "e1");
+        let enrichment = &call["arguments"]["enrichment"];
+        assert_eq!(enrichment["summary"], "Started a new job.");
+        assert_eq!(enrichment["emotions"], serde_json::json!(["nervous"]));
+    }
+
+    #[tokio::test]
     async fn search_call_id_is_unique_across_turns() {
         // The client keys tool-activity UI on the call id, so a later turn's
         // search must not reuse the first turn's id. A longer transcript (a

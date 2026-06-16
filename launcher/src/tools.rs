@@ -11,9 +11,16 @@
 //!   * `search_entries`  — keyword/metadata search over the browser's IndexedDB
 //!   * `attach_metadata` — write harness-provided enrichment into local storage
 //!
-//! The enclave locus (model-bound `embed`/`summarize`/`extract_metadata`)
-//! arrives in issue #11; `Locus` is already here so the manifest and the
-//! routing don't have to change shape when it does.
+//! Issue #11 adds the *enclave* locus (model-bound) — executed in-enclave by
+//! the launcher (`enclave_tools.rs`), never handed to the browser:
+//!   * `embed`            — embed text with the EmbeddingGemma instance
+//!   * `summarize`        — summarize text with the chat model
+//!   * `extract_metadata` — pull emotions/situations/life-phases (chat model)
+//!
+//! `embed` is advertised only when an embeddings model is loaded (see
+//! `manifest_json`): the harness reads the manifest to learn which enclave
+//! tools a deployment offers, so semantic search degrades gracefully to keyword
+//! search where no embeddings instance exists.
 //!
 //! Validation is deliberately lightweight — name membership, locus, and the
 //! presence of each declared required argument — so the audited TCB carries no
@@ -31,10 +38,8 @@ use serde_json::{json, Value};
 #[serde(rename_all = "lowercase")]
 pub enum Locus {
     Client,
-    // No enclave-locus tools ship until issue #11, but the variant (and the
-    // locus check in `chat.rs`) are here now so the routing is explicit: a
-    // harness must never get an enclave tool returned to the browser.
-    #[allow(dead_code)]
+    /// Model-bound tools the launcher runs in-enclave (`enclave_tools.rs`); the
+    /// browser must never be asked to run one. `chat.rs` routes on this.
     Enclave,
 }
 
@@ -69,6 +74,28 @@ const TOOLS: &[ToolSpec] = &[
         locus: Locus::Client,
         required: &["entry_id", "enrichment"],
     },
+    ToolSpec {
+        name: "embed",
+        description: "Embed text with the in-enclave EmbeddingGemma instance; \
+                      returns a similarity vector. Available only when an \
+                      embeddings model is loaded.",
+        locus: Locus::Enclave,
+        required: &["text"],
+    },
+    ToolSpec {
+        name: "summarize",
+        description: "Summarize text with the in-enclave chat model; returns a \
+                      short summary.",
+        locus: Locus::Enclave,
+        required: &["text"],
+    },
+    ToolSpec {
+        name: "extract_metadata",
+        description: "Extract emotions, situations, and life phases from text \
+                      with the in-enclave chat model.",
+        locus: Locus::Enclave,
+        required: &["text"],
+    },
 ];
 
 /// Look up a tool by name.
@@ -96,48 +123,89 @@ pub fn validate_call(name: &str, arguments: &Value) -> Result<&'static ToolSpec,
 /// schemas — for the harness (handed in with the chat context) and the
 /// frontend to read. The schemas are descriptive (JSON Schema); the launcher
 /// enforces only `validate_call`'s subset.
-pub fn manifest_json() -> Value {
+///
+/// `embeddings_available` gates the `embed` tool: when no embeddings model is
+/// loaded it is omitted, and the harness (which reads the advertised names)
+/// falls back to keyword-only search. The text tools (`summarize`,
+/// `extract_metadata`) ride the always-present chat model, so they are always
+/// advertised.
+pub fn manifest_json(embeddings_available: bool) -> Value {
+    let mut tools = vec![
+        json!({
+            "name": "search_entries",
+            "description": lookup("search_entries").unwrap().description,
+            "locus": Locus::Client,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language or keyword query to match against entry titles, bodies, and metadata.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of entries to return (top-k). Defaults to 5.",
+                    },
+                    "query_embedding": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "description": "Optional query embedding (from the `embed` tool) for semantic ranking over locally stored entry embeddings.",
+                    },
+                },
+                "required": ["query"],
+            },
+        }),
+        json!({
+            "name": "attach_metadata",
+            "description": lookup("attach_metadata").unwrap().description,
+            "locus": Locus::Client,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entry_id": {
+                        "type": "string",
+                        "description": "Opaque id of the entry to enrich.",
+                    },
+                    "enrichment": {
+                        "type": "object",
+                        "description": "Enrichment to merge into the entry (emotions, situations, lifePhases, summary, embedding).",
+                    },
+                },
+                "required": ["entry_id", "enrichment"],
+            },
+        }),
+        json!({
+            "name": "summarize",
+            "description": lookup("summarize").unwrap().description,
+            "locus": Locus::Enclave,
+            "parameters": text_tool_parameters(),
+        }),
+        json!({
+            "name": "extract_metadata",
+            "description": lookup("extract_metadata").unwrap().description,
+            "locus": Locus::Enclave,
+            "parameters": text_tool_parameters(),
+        }),
+    ];
+    if embeddings_available {
+        tools.push(json!({
+            "name": "embed",
+            "description": lookup("embed").unwrap().description,
+            "locus": Locus::Enclave,
+            "parameters": text_tool_parameters(),
+        }));
+    }
+    json!({ "tools": tools })
+}
+
+/// The shared `{ text }` parameter schema of the enclave text tools.
+fn text_tool_parameters() -> Value {
     json!({
-        "tools": [
-            {
-                "name": "search_entries",
-                "description": lookup("search_entries").unwrap().description,
-                "locus": Locus::Client,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Natural-language or keyword query to match against entry titles, bodies, and metadata.",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of entries to return (top-k). Defaults to 5.",
-                        },
-                    },
-                    "required": ["query"],
-                },
-            },
-            {
-                "name": "attach_metadata",
-                "description": lookup("attach_metadata").unwrap().description,
-                "locus": Locus::Client,
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "entry_id": {
-                            "type": "string",
-                            "description": "Opaque id of the entry to enrich.",
-                        },
-                        "enrichment": {
-                            "type": "object",
-                            "description": "Enrichment to merge into the entry (emotions, situations, lifePhases, summary, embedding).",
-                        },
-                    },
-                    "required": ["entry_id", "enrichment"],
-                },
-            },
-        ],
+        "type": "object",
+        "properties": {
+            "text": { "type": "string", "description": "The text to process." },
+        },
+        "required": ["text"],
     })
 }
 
@@ -150,6 +218,15 @@ mod tests {
         let spec = validate_call("search_entries", &json!({ "query": "Mochi" })).unwrap();
         assert_eq!(spec.name, "search_entries");
         assert_eq!(spec.locus, Locus::Client);
+    }
+
+    #[test]
+    fn enclave_tool_validates_with_its_locus() {
+        let spec = validate_call("embed", &json!({ "text": "hello" })).unwrap();
+        assert_eq!(spec.name, "embed");
+        assert_eq!(spec.locus, Locus::Enclave);
+        let spec = validate_call("summarize", &json!({ "text": "hello" })).unwrap();
+        assert_eq!(spec.locus, Locus::Enclave);
     }
 
     #[test]
@@ -175,7 +252,7 @@ mod tests {
     /// drift, which would let a harness call a tool the launcher can't police.
     #[test]
     fn every_advertised_tool_is_enforceable() {
-        let manifest = manifest_json();
+        let manifest = manifest_json(true);
         for tool in manifest["tools"].as_array().unwrap() {
             let name = tool["name"].as_str().unwrap();
             assert!(
@@ -190,6 +267,27 @@ mod tests {
                 .map(|v| v.as_str().unwrap())
                 .collect();
             assert_eq!(advertised, lookup(name).unwrap().required);
+        }
+    }
+
+    /// `embed` is advertised only when an embeddings model is loaded, so the
+    /// harness can fall back to keyword search where there is none.
+    #[test]
+    fn embed_is_advertised_only_when_embeddings_available() {
+        let names = |available| {
+            manifest_json(available)["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert!(names(true).contains(&"embed".to_string()));
+        assert!(!names(false).contains(&"embed".to_string()));
+        // The text tools ride the always-present chat model, both ways.
+        for available in [true, false] {
+            assert!(names(available).contains(&"summarize".to_string()));
+            assert!(names(available).contains(&"extract_metadata".to_string()));
         }
     }
 }

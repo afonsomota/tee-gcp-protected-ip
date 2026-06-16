@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { enrichEntry } from "../attest/enrich";
+import { makeToolExecutor } from "../attest/tools";
+import { useEnclaveSession } from "../attest/useEnclaveSession";
+import { config } from "../lib/config";
 import type { JournalDb } from "../lib/store";
 import { type JournalEntry, newEntry } from "../lib/types";
 import { ChatPane } from "./ChatPane";
@@ -15,7 +19,13 @@ export function JournalView({ db, journalKey, onLock }: Props) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [status, setStatus] = useState<string | null>(null);
+  // Ids currently being enriched in the enclave (async, non-blocking).
+  const [enriching, setEnriching] = useState<Set<string>>(new Set());
   const fileInput = useRef<HTMLInputElement>(null);
+
+  // One verified enclave session shared by the chat pane and entry enrichment.
+  const session = useEnclaveSession();
+  const executeTool = useMemo(() => makeToolExecutor(db, journalKey), [db, journalKey]);
 
   const refresh = useCallback(async () => {
     setEntries(await db.listEntries(journalKey));
@@ -34,6 +44,38 @@ export function JournalView({ db, journalKey, onLock }: Props) {
     setStatus(null);
   }
 
+  /**
+   * Kick off enrichment for a saved entry in the background. Deliberately not
+   * awaited by `handleSave`: journal CRUD stays fully usable while the enclave
+   * summarizes, extracts metadata, and embeds (issue #11). The enclave stores
+   * the result via `attach_metadata`, so we just refresh once it lands.
+   */
+  async function startEnrichment(entry: JournalEntry) {
+    if (session.status.kind !== "verified") return;
+    if (entry.body.trim() === "" && entry.title.trim() === "") return;
+    const hpkeKey = session.status.hpkePublicKey;
+    setEnriching((prev) => new Set(prev).add(entry.id));
+    try {
+      await enrichEntry(
+        config.apiEndpoint,
+        hpkeKey,
+        { id: entry.id, title: entry.title, body: entry.body },
+        { executeTool },
+      );
+      await refresh();
+    } catch (err) {
+      // Enrichment is best-effort: a failure leaves the entry intact, just
+      // without metadata. Surface it quietly without blocking the journal.
+      console.error("enrichment failed", err);
+    } finally {
+      setEnriching((prev) => {
+        const next = new Set(prev);
+        next.delete(entry.id);
+        return next;
+      });
+    }
+  }
+
   async function handleSave() {
     const entry: JournalEntry =
       selected !== null
@@ -42,7 +84,9 @@ export function JournalView({ db, journalKey, onLock }: Props) {
     await db.putEntry(journalKey, entry);
     await refresh();
     setSelectedId(entry.id);
-    setStatus("Saved.");
+    setStatus(session.status.kind === "verified" ? "Saved. Enriching privately…" : "Saved.");
+    // Fire-and-forget: do not await, so saving stays instant.
+    void startEnrichment(entry);
   }
 
   async function handleDelete() {
@@ -95,7 +139,22 @@ export function JournalView({ db, journalKey, onLock }: Props) {
                 className={entry.id === selectedId ? "entry-link selected" : "entry-link"}
                 onClick={() => select(entry)}
               >
-                <span className="entry-title">{entry.title || "Untitled"}</span>
+                <span className="entry-title">
+                  {entry.title || "Untitled"}
+                  {enriching.has(entry.id) ? (
+                    <span className="entry-enriching" title="Enriching in the enclave…">
+                      {" "}
+                      ✨
+                    </span>
+                  ) : (
+                    entry.enrichment?.enrichedAt !== undefined && (
+                      <span className="entry-enriched" title="Enriched by the enclave">
+                        {" "}
+                        🏷️
+                      </span>
+                    )
+                  )}
+                </span>
                 <span className="entry-date">
                   {new Date(entry.createdAt).toLocaleDateString()}
                 </span>
@@ -153,7 +212,7 @@ export function JournalView({ db, journalKey, onLock }: Props) {
         </div>
       </section>
 
-      <ChatPane db={db} journalKey={journalKey} />
+      <ChatPane db={db} journalKey={journalKey} session={session} />
     </div>
   );
 }
