@@ -178,19 +178,60 @@ def gcs_object_exists(token: str, bucket: str, name: str) -> bool:
     return True
 
 
+def md5_b64(data: bytes) -> str:
+    """GCS expects md5Hash as base64 of the raw 16-byte digest, not hex."""
+    return base64.b64encode(hashlib.md5(data).digest()).decode()
+
+
+def file_md5_b64(path: Path) -> str:
+    digest = hashlib.md5()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(block)
+    return base64.b64encode(digest.digest()).decode()
+
+
+def _multipart_related(metadata: dict, data: bytes, content_type: str) -> tuple[bytes, str]:
+    """Build a multipart/related body (metadata part + data part) for the JSON
+    upload API — the media uploadType can't carry an md5Hash, multipart can."""
+    boundary = secrets.token_hex(16)
+    body = b"".join([
+        f"--{boundary}\r\n".encode(),
+        b"Content-Type: application/json; charset=UTF-8\r\n\r\n",
+        json.dumps(metadata).encode(), b"\r\n",
+        f"--{boundary}\r\n".encode(),
+        f"Content-Type: {content_type}\r\n\r\n".encode(),
+        data, b"\r\n",
+        f"--{boundary}--\r\n".encode(),
+    ])
+    return body, f"multipart/related; boundary={boundary}"
+
+
 def gcs_upload_small(token: str, bucket: str, name: str, data: bytes,
                      content_type: str = "application/json") -> None:
+    # multipart carries an md5Hash alongside the bytes so GCS verifies the
+    # upload server-side and rejects an object corrupted in transit.
+    body, body_content_type = _multipart_related(
+        {"name": name, "md5Hash": md5_b64(data)}, data, content_type)
     resp = requests.post(
         f"https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o",
-        params={"uploadType": "media", "name": name},
-        headers={**auth_headers(token), "Content-Type": content_type},
-        data=data, timeout=60,
+        params={"uploadType": "multipart", "name": name},
+        headers={**auth_headers(token), "Content-Type": body_content_type},
+        data=body, timeout=60,
     )
     resp.raise_for_status()
 
 
 def gcs_upload_resumable(token: str, bucket: str, name: str, path: Path) -> None:
-    """Resumable upload for the multi-GB ciphertext: one session, streamed PUT."""
+    """Single streamed PUT of the multi-GB ciphertext (no mid-session resume).
+
+    Opens a resumable session, declares the object's md5Hash so GCS verifies
+    the bytes server-side and rejects a corrupted upload, then sends the whole
+    file in one PUT. A mid-upload drop is *not* resumed from the last committed
+    byte — the next run restarts from byte 0 (idempotency re-uploads the whole
+    artifact). The HF *download* path does resume; this upload deliberately
+    does not.
+    """
     size = path.stat().st_size
     init = requests.post(
         f"https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o",
@@ -201,7 +242,7 @@ def gcs_upload_resumable(token: str, bucket: str, name: str, path: Path) -> None
             "X-Upload-Content-Type": "application/octet-stream",
             "X-Upload-Content-Length": str(size),
         },
-        json={"name": name}, timeout=60,
+        json={"name": name, "md5Hash": file_md5_b64(path)}, timeout=60,
     )
     init.raise_for_status()
     session = init.headers["Location"]
