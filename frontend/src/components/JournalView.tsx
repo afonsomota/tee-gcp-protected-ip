@@ -153,7 +153,7 @@ export function JournalView({ db, journalKey, onLock }: Props) {
         </div>
       </section>
 
-      <ChatPane />
+      <ChatPane db={db} journalKey={journalKey} />
     </div>
   );
 }

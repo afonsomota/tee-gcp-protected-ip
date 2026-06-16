@@ -13,6 +13,7 @@ mod llama;
 #[cfg(test)]
 mod test_support;
 mod tls;
+mod tools;
 mod upstream;
 
 use std::sync::Arc;

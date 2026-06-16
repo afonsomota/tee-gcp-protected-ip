@@ -1,19 +1,40 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChatMessage } from "../attest/chat";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ChatMessage, ToolActivity } from "../attest/chat";
 import { hpkeChat } from "../attest/chat";
 import type { AttestationStatus } from "../attest/session";
 import { NETWORK_ERROR_CODE, runAttestation } from "../attest/session";
+import { makeToolExecutor } from "../attest/tools";
 import { AttestationError } from "../attest/verify";
 import { config } from "../lib/config";
+import type { JournalDb } from "../lib/store";
 import { AttestationBadge } from "./AttestationBadge";
 
-export function ChatPane() {
+interface Props {
+  /** The unlocked journal — the client tools read and write entries through it. */
+  db: JournalDb;
+  journalKey: CryptoKey;
+}
+
+/**
+ * One item in the chat transcript: a user/assistant message, or a record of a
+ * tool the enclave asked the browser to run. Tool items make the
+ * data-minimization flow visible — the user sees exactly what left their device.
+ */
+type ChatItem =
+  | { kind: "message"; role: "user" | "assistant"; content: string }
+  | { kind: "tool"; activity: ToolActivity };
+
+export function ChatPane({ db, journalKey }: Props) {
   const [attestStatus, setAttestStatus] = useState<AttestationStatus>({ kind: "idle" });
-  const [history, setHistory] = useState<ChatMessage[]>([]);
+  const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // The tool executor is bound to the unlocked journal; rebuild it only if the
+  // db or key changes (e.g. after a re-unlock).
+  const executeTool = useMemo(() => makeToolExecutor(db, journalKey), [db, journalKey]);
 
   const verify = useCallback(async () => {
     setAttestStatus({ kind: "verifying" });
@@ -41,9 +62,23 @@ export function ChatPane() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [history]);
+  }, [items, sending]);
 
   const canChat = attestStatus.kind === "verified";
+
+  // Append a new tool item, or update an existing one in place as its status
+  // moves running → done/error.
+  function recordActivity(activity: ToolActivity) {
+    setItems((prev) => {
+      const idx = prev.findIndex(
+        (item) => item.kind === "tool" && item.activity.id === activity.id,
+      );
+      if (idx === -1) return [...prev, { kind: "tool", activity }];
+      const next = prev.slice();
+      next[idx] = { kind: "tool", activity };
+      return next;
+    });
+  }
 
   async function handleSend() {
     // Narrowing the discriminated union gates chat AND types hpkePublicKey.
@@ -51,15 +86,24 @@ export function ChatPane() {
     const hpkeKey = attestStatus.hpkePublicKey;
 
     const userMessage: ChatMessage = { role: "user", content: input.trim() };
-    const nextHistory = [...history, userMessage];
-    setHistory(nextHistory);
+    // The enclave only ever sees the user/assistant transcript; tool items are
+    // local UI state, never sent.
+    const priorHistory = items
+      .filter((item): item is Extract<ChatItem, { kind: "message" }> => item.kind === "message")
+      .map(({ role, content }) => ({ role, content }) satisfies ChatMessage);
+    const nextHistory = [...priorHistory, userMessage];
+
+    setItems((prev) => [...prev, { kind: "message", ...userMessage }]);
     setInput("");
     setSending(true);
     setChatError(null);
 
     try {
-      const reply = await hpkeChat(config.apiEndpoint, hpkeKey, nextHistory);
-      setHistory([...nextHistory, { role: "assistant", content: reply }]);
+      const reply = await hpkeChat(config.apiEndpoint, hpkeKey, nextHistory, {
+        executeTool,
+        onActivity: recordActivity,
+      });
+      setItems((prev) => [...prev, { kind: "message", role: "assistant", content: reply }]);
     } catch (err) {
       // If chat fails with a key error, re-verify (enclave may have restarted)
       const msg = err instanceof Error ? err.message : String(err);
@@ -79,22 +123,33 @@ export function ChatPane() {
       </header>
 
       <div className="chat-messages">
-        {history.length === 0 && (
+        {items.length === 0 && (
           <p className="chat-empty muted">
             {canChat
               ? "Your messages are end-to-end encrypted and processed only inside the verified enclave."
               : "Chat is disabled until the enclave is verified."}
           </p>
         )}
-        {history.map((msg, i) => (
-          <div key={i} className={`chat-bubble chat-bubble--${msg.role}`}>
-            {msg.content}
-          </div>
-        ))}
+        {items.map((item, i) =>
+          item.kind === "message" ? (
+            <div key={i} className={`chat-bubble chat-bubble--${item.role}`}>
+              {item.content}
+            </div>
+          ) : (
+            <div
+              key={i}
+              className={`chat-tool chat-tool--${item.activity.status}`}
+              title={`Tool: ${item.activity.name}`}
+            >
+              <span className="chat-tool-icon" aria-hidden="true">
+                {item.activity.name === "search_entries" ? "🔍" : "🏷️"}
+              </span>
+              <span className="chat-tool-summary">{item.activity.summary}</span>
+            </div>
+          ),
+        )}
         {sending && (
-          <div className="chat-bubble chat-bubble--assistant chat-bubble--thinking muted">
-            …
-          </div>
+          <div className="chat-bubble chat-bubble--assistant chat-bubble--thinking muted">…</div>
         )}
         {chatError !== null && <p className="chat-error">{chatError}</p>}
         <div ref={bottomRef} />
