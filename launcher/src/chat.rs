@@ -71,8 +71,13 @@ fn validate(messages: &[Message]) -> Result<(), String> {
     }
     // Error responses go back unencrypted; name the offending index, never
     // the decrypted value (see the invariant in `chat` below).
-    if let Some(i) = messages.iter().position(|m| m.role != "user" && m.role != "assistant") {
-        return Err(format!("message {i}: role must be \"user\" or \"assistant\""));
+    if let Some(i) = messages
+        .iter()
+        .position(|m| m.role != "user" && m.role != "assistant")
+    {
+        return Err(format!(
+            "message {i}: role must be \"user\" or \"assistant\""
+        ));
     }
     Ok(())
 }
@@ -97,7 +102,12 @@ pub async fn chat(State(state): State<AppState>, Json(envelope): Json<Envelope>)
     }
     let reply_pub = match B64.decode(&request.reply_pub) {
         Ok(k) => k,
-        Err(e) => return error(StatusCode::BAD_REQUEST, &format!("reply_pub is not valid base64: {e}")),
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &format!("reply_pub is not valid base64: {e}"),
+            )
+        }
     };
     let reply = match complete(&upstream, &request.messages).await {
         Ok(r) => r,
@@ -122,7 +132,8 @@ fn decrypt_request(state: &AppState, envelope: &Envelope) -> Result<ChatRequest,
         .decode(&envelope.ct)
         .map_err(|e| format!("ct is not valid base64: {e}"))?;
     let plaintext = open(state.keys.hpke_private(), &enc, REQUEST_INFO, &ct)?;
-    serde_json::from_slice(&plaintext).map_err(|e| format!("request plaintext is not valid JSON: {e}"))
+    serde_json::from_slice(&plaintext)
+        .map_err(|e| format!("request plaintext is not valid JSON: {e}"))
 }
 
 /// One OpenAI-style chat completion against llama-server: the fixed system
@@ -227,7 +238,10 @@ mod tests {
         format!("127.0.0.1:{}", addr.port())
     }
 
-    async fn post_chat(state: AppState, envelope: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    async fn post_chat(
+        state: AppState,
+        envelope: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
         let response = crate::app(state)
             .oneshot(
                 Request::post("/chat")
@@ -255,15 +269,24 @@ mod tests {
             request.to_string().as_bytes(),
         )
         .unwrap();
-        (json!({ "enc": B64.encode(enc), "ct": B64.encode(ct) }), reply_sk)
+        (
+            json!({ "enc": B64.encode(enc), "ct": B64.encode(ct) }),
+            reply_sk,
+        )
     }
 
     /// A one-turn conversation: a single user message.
-    fn sealed_request(state: &AppState, msg: &str) -> (serde_json::Value, <Kem as KemTrait>::PrivateKey) {
+    fn sealed_request(
+        state: &AppState,
+        msg: &str,
+    ) -> (serde_json::Value, <Kem as KemTrait>::PrivateKey) {
         sealed_history(state, json!([{ "role": "user", "content": msg }]))
     }
 
-    fn open_reply(reply_sk: &<Kem as KemTrait>::PrivateKey, reply: &serde_json::Value) -> serde_json::Value {
+    fn open_reply(
+        reply_sk: &<Kem as KemTrait>::PrivateKey,
+        reply: &serde_json::Value,
+    ) -> serde_json::Value {
         let plaintext = open(
             reply_sk,
             &B64.decode(reply["enc"].as_str().unwrap()).unwrap(),
@@ -317,7 +340,10 @@ mod tests {
         let (envelope, _) = sealed_history(&state, json!([]));
         let (status, body) = post_chat(state, envelope).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body["error"].as_str().unwrap().contains("must not be empty"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("must not be empty"));
     }
 
     #[tokio::test]
@@ -339,7 +365,10 @@ mod tests {
         let error = body["error"].as_str().unwrap();
         assert!(error.contains("message 1"), "unexpected error: {error}");
         assert!(!error.contains("system"), "decrypted role leaked: {error}");
-        assert!(!error.contains("secret-injected"), "decrypted content leaked: {error}");
+        assert!(
+            !error.contains("secret-injected"),
+            "decrypted content leaked: {error}"
+        );
     }
 
     #[tokio::test]

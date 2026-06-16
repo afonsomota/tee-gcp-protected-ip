@@ -37,8 +37,8 @@ cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
 DIST="$REPO_ROOT/dist"
 
-# ---- pinned inputs (recipe version 2) --------------------------------------
-RECIPE_VERSION=2
+# ---- pinned inputs (recipe version 3) --------------------------------------
+RECIPE_VERSION=3
 # rust:1.88.0-alpine3.22, linux/amd64 platform image (not the multi-arch index)
 RUST_IMAGE="rust@sha256:64eba3726734dcfe89e0a62a0485007a3ab7c7372ce5b38c621d8812f70215f0"
 RUST_IMAGE_HUMAN="rust:1.88.0-alpine3.22 (linux/amd64)"
@@ -144,26 +144,37 @@ for _ in $(seq 1 50); do curl -fsS "http://$REG/v2/" >/dev/null 2>&1 && break; s
 # LLAMA_ARG_HOST overrides the base image's 0.0.0.0 default — the launcher
 # already passes --host 127.0.0.1 explicitly, but nothing in the image may
 # even default to binding the model to a public interface.
+# allow_mount_destinations=/models lets the operator attach the tee-mount
+# tmpfs that artifact delivery (issue 007) decrypts the weights into —
+# plaintext weights only ever exist in SEV-SNP-encrypted guest memory.
 "$CRANE" mutate "$REG/launcher:rc" \
   --set-platform linux/amd64 \
   --entrypoint /launcher \
   --env LLAMA_ARG_HOST=127.0.0.1 \
   --label tee.launch_policy.log_redirect=always \
+  --label tee.launch_policy.allow_mount_destinations=/models \
   -t "$REG/launcher:release" >/dev/null
 DIGEST="$("$CRANE" digest "$REG/launcher:release")"
 
-# No LLAMA_* variable may ever be operator-overridable: an operator who
+# No LLAMA_* variable may ever be operator-overridable (an operator who
 # could set LLAMA_UPSTREAM would point decrypted user messages at an
-# arbitrary address (launcher/src/llama.rs module docs). Fail the build if
-# the label ever appears — e.g. inherited from a future base image bump.
+# arbitrary address — launcher/src/llama.rs module docs), and the entrypoint
+# args must not be either (cmd override could pass --dev to /launcher).
+# Fail the build if either label ever appears — e.g. inherited from a
+# future base image bump.
 "$CRANE" config "$REG/launcher:release" | python3 -c '
 import json, sys
 labels = json.load(sys.stdin)["config"].get("Labels") or {}
-if "tee.launch_policy.allow_env_override" in labels:
-    sys.exit("FATAL: tee.launch_policy.allow_env_override label present on "
-             "the release image: " + labels["tee.launch_policy.allow_env_override"])
+for forbidden in ("tee.launch_policy.allow_env_override",
+                  "tee.launch_policy.allow_cmd_override"):
+    if forbidden in labels:
+        sys.exit("FATAL: %s label present on the release image: %s"
+                 % (forbidden, labels[forbidden]))
 if labels.get("tee.launch_policy.log_redirect") != "always":
     sys.exit("FATAL: tee.launch_policy.log_redirect=always label missing")
+if labels.get("tee.launch_policy.allow_mount_destinations") != "/models":
+    sys.exit("FATAL: tee.launch_policy.allow_mount_destinations=/models label "
+             "missing: artifact delivery cannot mount its tmpfs")
 '
 
 rm -rf "$DIST/oci-layout"

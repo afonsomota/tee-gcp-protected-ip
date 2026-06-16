@@ -2,7 +2,9 @@
 //! attestation-token endpoint. This is the seed of the audited TCB described
 //! in docs/DESIGN.md.
 
+mod artifacts;
 mod chat;
+mod gcp;
 mod hpke_channel;
 mod keys;
 mod llama;
@@ -57,10 +59,16 @@ async fn main() {
         .unwrap_or(8080);
     let dev = std::env::args().any(|a| a == "--dev")
         || std::env::var("LAUNCHER_DEV").is_ok_and(|v| v == "1");
+    // Attestation-gated weights delivery (artifacts.rs) wins over an
+    // image-baked model; both end in the same supervised llama-server.
+    let inference = match artifacts::init(dev).await {
+        Some(upstream) => Some(upstream),
+        None => llama::init_from_env(dev),
+    };
     let state = AppState {
         keys: Arc::new(keys::EnclaveKeys::generate()),
         dev,
-        inference: llama::init_from_env(dev),
+        inference,
     };
     println!(
         "enclave key bindings: {} {}",

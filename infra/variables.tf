@@ -56,6 +56,29 @@ variable "static_ip_name" {
   default     = "tee-example-cvm"
 }
 
+variable "weights_object" {
+  description = <<-EOT
+    GCS object name of the encrypted-weights manifest inside the artifacts
+    bucket (e.g. "weights/model.gguf.manifest.json"), as printed by
+    scripts/provision-weights.py. Put it in infra/terraform.tfvars (gitignored,
+    auto-loaded) — make deploy only passes project_id and image_digest.
+    null or "" disables artifact delivery: no weights metadata on the CVM and
+    no KMS decrypt grant, so /chat stays inactive on release images.
+  EOT
+  type        = string
+  default     = null
+}
+
+variable "weights_tmpfs_bytes" {
+  description = <<-EOT
+    Size of the in-memory tmpfs Confidential Space mounts at /models for the
+    decrypted weights. Must fit the plaintext model; counts against guest RAM
+    (n2d-standard-4 has 16 GiB).
+  EOT
+  type        = number
+  default     = 8589934592 # 8 GiB
+}
+
 variable "deployment_suffix" {
   description = <<-EOT
     Suffix for a per-branch dev deployment running alongside prod ("" = prod).
