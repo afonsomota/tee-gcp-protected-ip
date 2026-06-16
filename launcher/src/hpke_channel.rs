@@ -164,6 +164,7 @@ mod tests {
             dev: false,
             inference: None,
             harness: Arc::new(crate::harness::HarnessSlot::empty()),
+            activity: crate::idle::new_activity(),
         }
     }
 

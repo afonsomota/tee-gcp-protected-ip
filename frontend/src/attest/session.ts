@@ -26,6 +26,9 @@ export const NETWORK_ERROR_CODE = "NETWORK_ERROR";
 export type AttestationStatus =
   | { kind: "idle" }
   | { kind: "verifying" }
+  // Scale-from-zero (issue #45): the API was unreachable and we asked the
+  // controller to wake the enclave; we are polling attestation until it boots.
+  | { kind: "warming" }
   | { kind: "verified"; hpkePublicKey: Uint8Array; signatureVerified: boolean }
   | { kind: "failed"; code: string; detail: string };
 

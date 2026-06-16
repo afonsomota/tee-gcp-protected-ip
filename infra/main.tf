@@ -23,6 +23,11 @@ terraform {
       source  = "hashicorp/time"
       version = "~> 0.13"
     }
+    # Zips the controller/ source for the Cloud Function (issue #45).
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.0"
+    }
   }
 }
 
@@ -45,6 +50,10 @@ locals {
   # to the pre-suffix configuration, so existing prod state plans zero-diff.
   is_prod     = var.deployment_suffix == ""
   name_suffix = local.is_prod ? "" : "-${var.deployment_suffix}"
+  # Instance name as a plain string so the controller can target it without
+  # depending on the CVM resource — that breaks what would otherwise be a cycle
+  # (the CVM's metadata references the controller's URL, issue #45).
+  instance_name = "tee-example-cvm${local.name_suffix}"
   # The workspace a deployment's state must live in: prod in `default`,
   # dev deployments in the workspace named after their suffix.
   expected_workspace = local.is_prod ? "default" : var.deployment_suffix
@@ -105,6 +114,18 @@ locals {
   # if *either* is delivered. With weights enabled (the usual case) this is
   # unchanged, so prod plans zero-diff.
   artifact_delivery_enabled = local.weights_enabled || local.harness_enabled
+
+  # ---- Scale-from-zero (issue #45) ------------------------------------------
+  # Prod only: a dev deployment takes an ephemeral IP that a stop would
+  # discard, so the controller and the idle metadata are never wired for dev.
+  scale_enabled = local.is_prod && var.scale_to_zero
+  # Delivered to the CVM as instance metadata, same channel as TLS/weights
+  # config (read via the metadata server, not env). controller-url arms the
+  # launcher's idle timer; without it the launcher stays up.
+  controller_metadata = local.scale_enabled ? {
+    controller-url       = google_cloudfunctions2_function.controller[0].url
+    idle-timeout-minutes = tostring(var.idle_timeout_minutes)
+  } : {}
 }
 
 # Project number is needed to name the workload identity pool principalSet.
@@ -226,8 +247,126 @@ resource "google_compute_firewall" "allow_http" {
   target_tags   = ["tee-example"]
 }
 
+# ---- Scale-from-zero controller (issue #45) --------------------------------
+# A gen2 Cloud Function (scales to 0) that the frontend pokes to start the
+# stopped CVM and the launcher pokes to stop it when idle. It lives in this
+# per-deployment root because it operates on this deployment's instance; it is
+# outside the audited TCB and holds no privacy trust (the frontend re-attests
+# on every reconnect). See controller/ and docs/DESIGN.md.
+
+resource "google_service_account" "controller" {
+  count        = local.scale_enabled ? 1 : 0
+  account_id   = "tee-example-controller"
+  display_name = "TEE example scale-from-zero controller"
+}
+
+# Least privilege: exactly the compute verbs the controller needs to read
+# status and flip the power switch — not the broad instanceAdmin role.
+resource "google_project_iam_custom_role" "controller" {
+  count       = local.scale_enabled ? 1 : 0
+  role_id     = "teeExampleController"
+  title       = "TEE example CVM start/stop"
+  description = "Start, stop, and read status of the scale-from-zero CVM (issue #45)."
+  permissions = [
+    "compute.instances.get",
+    "compute.instances.start",
+    "compute.instances.stop",
+    "compute.zoneOperations.get",
+  ]
+}
+
+resource "google_project_iam_member" "controller_compute" {
+  count   = local.scale_enabled ? 1 : 0
+  project = var.project_id
+  role    = google_project_iam_custom_role.controller[0].id
+  member  = "serviceAccount:${google_service_account.controller[0].email}"
+}
+
+# Read-only on logs: the idle path counts "tls certificate issued" entries.
+resource "google_project_iam_member" "controller_logging" {
+  count   = local.scale_enabled ? 1 : 0
+  project = var.project_id
+  role    = "roles/logging.viewer"
+  member  = "serviceAccount:${google_service_account.controller[0].email}"
+}
+
+# Source bucket for the function zip. force_destroy is safe: it only ever holds
+# ephemeral, redeployable source archives, never state or user data.
+resource "google_storage_bucket" "controller_source" {
+  count                       = local.scale_enabled ? 1 : 0
+  name                        = "${var.project_id}-tee-controller-src"
+  location                    = var.region
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = true
+}
+
+data "archive_file" "controller" {
+  count       = local.scale_enabled ? 1 : 0
+  type        = "zip"
+  source_dir  = "${path.module}/../controller"
+  output_path = "${path.module}/.controller.zip"
+}
+
+resource "google_storage_bucket_object" "controller_source" {
+  count = local.scale_enabled ? 1 : 0
+  # Hash in the name so a source change uploads a new object and redeploys.
+  name   = "controller-${data.archive_file.controller[0].output_md5}.zip"
+  bucket = google_storage_bucket.controller_source[0].name
+  source = data.archive_file.controller[0].output_path
+}
+
+resource "google_cloudfunctions2_function" "controller" {
+  count       = local.scale_enabled ? 1 : 0
+  name        = "tee-example-controller"
+  location    = var.region
+  description = "Scale-from-zero wake/idle controller for the CVM (issue #45)"
+
+  build_config {
+    runtime     = "python312"
+    entry_point = "controller"
+    source {
+      storage_source {
+        bucket = google_storage_bucket.controller_source[0].name
+        object = google_storage_bucket_object.controller_source[0].name
+      }
+    }
+  }
+
+  service_config {
+    min_instance_count    = 0 # scale to zero: no cost when no one is waking it
+    max_instance_count    = 2
+    available_memory      = "256Mi"
+    timeout_seconds       = 60
+    service_account_email = google_service_account.controller[0].email
+    environment_variables = {
+      CVM_PROJECT      = var.project_id
+      INSTANCE_NAME    = local.instance_name
+      INSTANCE_ZONE    = var.zone
+      MAX_WEEKLY_BOOTS = tostring(var.max_weekly_boots)
+    }
+  }
+
+  depends_on = [
+    google_project_iam_member.controller_compute,
+    google_project_iam_member.controller_logging,
+  ]
+}
+
+# The browser's /wake is unauthenticated, so allow public invocation. Worst
+# case for an anonymous caller: start a stopped VM or ask to stop an idle one
+# (budget-gated) — both are normal operation, and the VM grants no trust to
+# whatever started it (re-attestation on reconnect).
+resource "google_cloud_run_service_iam_member" "controller_public" {
+  count    = local.scale_enabled ? 1 : 0
+  location = var.region
+  service  = google_cloudfunctions2_function.controller[0].name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
 resource "google_compute_instance" "cvm" {
-  name             = "tee-example-cvm${local.name_suffix}"
+  name             = local.instance_name
   machine_type     = var.machine_type
   zone             = var.zone
   tags             = ["tee-example"]
@@ -276,6 +415,7 @@ resource "google_compute_instance" "cvm" {
     local.tls_metadata,
     local.weights_metadata,
     local.harness_metadata,
+    local.controller_metadata,
   )
 
   service_account {
@@ -313,4 +453,11 @@ output "external_ip" {
 
 output "image_reference" {
   value = local.image_reference
+}
+
+# Base URL of the scale-from-zero controller, or "" when disabled. Feed this to
+# the frontend as VITE_CONTROLLER_ENDPOINT so the app can wake a stopped enclave.
+output "controller_url" {
+  description = "Scale-from-zero controller base URL (set as VITE_CONTROLLER_ENDPOINT); empty when scale_to_zero is off."
+  value       = local.scale_enabled ? google_cloudfunctions2_function.controller[0].url : ""
 }

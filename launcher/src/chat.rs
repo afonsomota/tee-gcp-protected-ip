@@ -261,6 +261,7 @@ mod tests {
             dev: false,
             inference,
             harness: Arc::new(load_fixture_harness()),
+            activity: crate::idle::new_activity(),
         }
     }
 

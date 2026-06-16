@@ -140,6 +140,23 @@ pub async fn instance_attribute(name: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// POST a JSON body to an arbitrary HTTPS URL and return the status, discarding
+/// the response body. Used for the scale-from-zero idle poke (issue #45) to the
+/// untrusted controller: the launcher only needs the call delivered and treats
+/// every error as "stay up", so the caller cares about the status, not the body.
+/// Reuses the shared webpki-roots client — the controller's TLS chains to a
+/// public CA, the same trust anchors the ACME and STS calls already use.
+pub async fn post_json(uri: &str, body: Vec<u8>) -> Result<StatusCode, String> {
+    let (status, _) = request(
+        Method::POST,
+        uri,
+        &[("Content-Type", "application/json")],
+        body,
+    )
+    .await?;
+    Ok(status)
+}
+
 /// Access token of the VM's service account, from the metadata server.
 pub async fn metadata_access_token() -> Result<String, String> {
     let uri = format!("{METADATA_BASE}/instance/service-accounts/default/token");

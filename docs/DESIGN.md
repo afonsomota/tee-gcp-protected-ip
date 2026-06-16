@@ -29,6 +29,7 @@ provably constrains: nothing leaves except the reply you see."*
 | Build verification | **Reproducible builds as the trust anchor**: the released image is produced by a fully pinned, deterministic recipe (pinned-container musl build → fixed-metadata layer tar → pinned crane append onto the digest-pinned official llama.cpp server base, spike 002 / issue #29) that any verifier re-runs offline to re-derive the digest — zero trust in the operator or CI. Canonical build on GitHub Actions with an independent cross-rebuild job, release-blocking on digest mismatch; sigstore artifact attestations as the convenience tier. Residual limitations (documented in README): both builds run on GitHub infra, so CI compromise is detectable by third-party rebuilds, not prevented; and llama-server's bytes are upstream's public content-addressed artifact at the pinned digest, not re-derived from source (source rebuild recorded as future hardening). The base is mirrored by digest into Artifact Registry (`make mirror-base`), so rebuilds never depend on ghcr retention. Weights are never baked; until issue #7 lands, release builds serve 503 on `/chat`. See `docs/spikes/002-llama-server-in-release-image.md`. |
 | Frontend | React + Vite + TypeScript SPA (pnpm), deployed to **GitHub Pages** by Actions. hpke-js + jose for crypto. Verifies attestation and shows a badge with a "know more" link to the verify docs. Trust-on-first-use caveat documented; paranoid users run it locally. |
 | Release flow | Frontend: auto via Actions. Enclave: release tag triggers the reproducible build workflow (build + independent re-derivation + push by digest + attestation), then explicit `make deploy` (pin digest into the CVM, update KMS attestation policy). |
+| Availability / cost | **Scale from zero** (issue #45): no always-on CVM. A tiny always-on **controller** (Cloud Function, outside the TCB) starts the stopped VM when the browser finds the API unreachable and stops it again after an idle timeout. Because Confidential Space re-encrypts disk per boot, every boot orders a *fresh* Let's Encrypt cert; rather than fight the 5-certs/7-days prod limit, the controller **budgets around it** — it declines to stop when a restart would breach `max_weekly_boots`, so the VM stays warm (pays compute) instead of locking out TLS. The limit is a cost knob, never a wall. |
 | Repo layout | Monorepo: `frontend/`, `launcher/`, `harness/` (simulated private repo with explanatory README), `infra/` (Terraform), `docs/` (architecture, threat model, verify-it-yourself). |
 
 ## Chat flow
@@ -56,6 +57,14 @@ tool-calls — all of which go to the user.
 
 **Company IP rests on:** KMS attestation-gated key release (Google IAM is in
 the *IP* TCB, not the *privacy* TCB).
+
+**The scale-from-zero controller is untrusted** (issue #45): it can only
+stop/start the VM, never read its memory. A restarted enclave generates fresh
+HPKE/TLS keys and a fresh Google-signed token, and the frontend re-attests from
+scratch on every reconnect — so the entity that pressed "start" is granted no
+privacy trust. The launcher's only role in its own lifecycle is to *ask* (an
+idle poke); the budget decision and the stop live in the untrusted controller,
+keeping CT/HTTP-parse logic out of the audited TCB.
 
 **TLS is defense-in-depth; HPKE carries the trust.** The enclave terminates
 TLS itself (rustls-acme, TLS-ALPN-01; the private key never leaves enclave
