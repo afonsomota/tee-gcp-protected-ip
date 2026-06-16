@@ -165,11 +165,22 @@ async function attachMetadata(
   args: Record<string, unknown>,
 ): Promise<ToolOutcome> {
   const entryId = typeof args.entry_id === "string" ? args.entry_id : "";
-  const enrichment = isObject(args.enrichment) ? (args.enrichment as EntryEnrichment) : null;
-  if (entryId === "" || enrichment === null) {
+  const raw = isObject(args.enrichment) ? args.enrichment : null;
+  if (entryId === "" || raw === null) {
     return {
       result: { ok: false, error: "attach_metadata needs entry_id and an enrichment object" },
       summary: "Couldn't attach metadata: malformed request.",
+    };
+  }
+
+  // The harness is untrusted (closed IP, sandboxed): take only the recognized,
+  // correctly-typed enrichment fields, never an arbitrary object, before this
+  // is written into the user's persistent encrypted storage.
+  const enrichment = sanitizeEnrichment(raw);
+  if (Object.keys(enrichment).length === 0) {
+    return {
+      result: { ok: false, entry_id: entryId, error: "no recognized enrichment fields" },
+      summary: "Couldn't attach metadata: no recognized enrichment fields.",
     };
   }
 
@@ -197,6 +208,29 @@ async function attachMetadata(
     result: { ok: true, entry_id: entryId },
     summary: `Saved metadata to “${entry.title || "Untitled"}” (stays encrypted on your device).`,
   };
+}
+
+/**
+ * Keep only the enrichment fields the schema declares, each with its expected
+ * type; anything else the harness sends is dropped. `enrichedAt` is set by the
+ * writer, never accepted from the harness.
+ */
+function sanitizeEnrichment(raw: Record<string, unknown>): EntryEnrichment {
+  const out: EntryEnrichment = {};
+  const strings = (v: unknown): string[] | undefined =>
+    Array.isArray(v) && v.every((x) => typeof x === "string") ? (v as string[]) : undefined;
+
+  const emotions = strings(raw.emotions);
+  if (emotions !== undefined) out.emotions = emotions;
+  const situations = strings(raw.situations);
+  if (situations !== undefined) out.situations = situations;
+  const lifePhases = strings(raw.lifePhases);
+  if (lifePhases !== undefined) out.lifePhases = lifePhases;
+  if (typeof raw.summary === "string") out.summary = raw.summary;
+  if (Array.isArray(raw.embedding) && raw.embedding.every((x) => typeof x === "number")) {
+    out.embedding = raw.embedding as number[];
+  }
+  return out;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

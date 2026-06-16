@@ -450,6 +450,34 @@ mod tests {
         let call = &reply["tool_calls"][0];
         assert_eq!(call["name"], "search_entries");
         assert_eq!(call["arguments"]["query"], "how was my week?");
+        // One-message turn → id "search-1".
+        assert_eq!(call["id"], "search-1");
+    }
+
+    #[tokio::test]
+    async fn search_call_id_is_unique_across_turns() {
+        // The client keys tool-activity UI on the call id, so a later turn's
+        // search must not reuse the first turn's id. A longer transcript (a
+        // second user message) yields a distinct id derived from its length.
+        let harness = Harness::new(&fixture_wasm(), &fixture_sig()).unwrap();
+        let context = serde_json::json!({
+            "messages": [
+                { "role": "user", "content": "how was my week?" },
+                { "role": "assistant", "content": "let me check" },
+                { "role": "user", "content": "and last month?" },
+            ]
+        })
+        .to_string();
+
+        let out = harness
+            .run("127.0.0.1:1", context.as_bytes())
+            .await
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let call = &reply["tool_calls"][0];
+        assert_eq!(call["arguments"]["query"], "and last month?");
+        // Three-message transcript → id "search-3", distinct from "search-1".
+        assert_eq!(call["id"], "search-3");
     }
 
     #[tokio::test]

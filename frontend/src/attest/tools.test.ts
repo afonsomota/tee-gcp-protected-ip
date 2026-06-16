@@ -130,6 +130,44 @@ describe("attach_metadata", () => {
     expect(enriched.enrichment?.enrichedAt).toBeDefined();
   });
 
+  it("drops unrecognized or wrongly-typed fields the untrusted harness sends", async () => {
+    const { db, key, ids } = await seededJournal();
+    const executor = makeToolExecutor(db, key);
+
+    const { result } = await executor({
+      id: "1",
+      name: "attach_metadata",
+      arguments: {
+        entry_id: ids.work,
+        enrichment: {
+          summary: "kept",
+          emotions: ["joy", 7], // wrong element type → whole field dropped
+          evil: { script: "<img onerror>" }, // unknown key → dropped
+          enrichedAt: "1999-01-01T00:00:00Z", // writer-owned → never accepted
+        },
+      },
+    });
+    expect(result).toMatchObject({ ok: true });
+
+    const enriched = (await db.listEntries(key)).find((e) => e.id === ids.work)!;
+    expect(enriched.enrichment?.summary).toBe("kept");
+    expect(enriched.enrichment?.emotions).toBeUndefined();
+    expect((enriched.enrichment as Record<string, unknown>).evil).toBeUndefined();
+    // enrichedAt is set by the writer, not taken from the harness payload.
+    expect(enriched.enrichment?.enrichedAt).not.toBe("1999-01-01T00:00:00Z");
+  });
+
+  it("reports ok:false when no enrichment field is recognized", async () => {
+    const { db, key, ids } = await seededJournal();
+    const executor = makeToolExecutor(db, key);
+    const { result } = await executor({
+      id: "1",
+      name: "attach_metadata",
+      arguments: { entry_id: ids.work, enrichment: { bogus: true } },
+    });
+    expect(result).toMatchObject({ ok: false });
+  });
+
   it("reports ok:false for an unknown entry instead of throwing", async () => {
     const { db, key } = await seededJournal();
     const executor = makeToolExecutor(db, key);

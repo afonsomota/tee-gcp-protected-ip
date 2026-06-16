@@ -178,8 +178,14 @@ fn retrieve(messages: &[Message]) -> Option<Vec<u8>> {
         .find(|m| m.role == "user")?
         .content
         .clone();
+    // The id must be unique per turn: the client keys tool-activity UI on it,
+    // so reusing a constant would make a later turn's search clobber an earlier
+    // turn's record. `messages.len()` strictly increases each user turn (every
+    // turn appends at least the new user message plus any prior reply) and is
+    // stable across the retrieve/answer legs of one turn, so it gives a stable,
+    // collision-free id without the harness having to carry state.
     let call = serde_json::json!({
-        "id": "search-1",
+        "id": format!("search-{}", messages.len()),
         "name": "search_entries",
         "arguments": { "query": query, "limit": 5 },
     });
