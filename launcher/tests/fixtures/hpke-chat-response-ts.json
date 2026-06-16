@@ -1,0 +1,15 @@
+{
+  "suite": {
+    "kem": "DHKEM(X25519, HKDF-SHA256)",
+    "kdf": "HKDF-SHA256",
+    "aead": "ChaCha20Poly1305"
+  },
+  "generator": "hpke-js @hpke/core v1.9",
+  "recipient_private_key": "uJwyS61UqKenzxJyp1IttyOwb9hjoS7PLC3gCFciKw8=",
+  "recipient_public_key": "7ihLJPZnYIF9rKzXqHLcKC0yP+fXrckJZK41mX7a4y8=",
+  "info": "dGVlLWV4YW1wbGUvaHBrZS9jaGF0L3Jlc3BvbnNlL3Yx",
+  "aad": "",
+  "plaintext": "aHBrZSBjaGF0L3Jlc3BvbnNlIGludGVyb3AgdmVjdG9yLCBzZWFsZWQgYnkgaHBrZS1qcyAoQGhwa2UvY29yZSk=",
+  "enc": "HzOe1cuWEyLouJpuRzug7nd05yXJv6iRaQrpLBbL/xY=",
+  "ct": "vIysVno7KYPV0AjUgxgzUYSqwaTO8kPQS6yDnZGSpXWEIXbF9u3aPBw7cF9DeLEjdIzBAINu5/FYroB4mpWsVQLZPCveXFEHki9ylH9nq6J2"
+}

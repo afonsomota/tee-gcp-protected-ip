@@ -190,7 +190,7 @@ mod tests {
     use axum::http::Request;
     use axum::routing::post;
     use axum::Router;
-    use hpke::{Kem as KemTrait, Serializable};
+    use hpke::{Deserializable, Kem as KemTrait, Serializable};
     use http_body_util::BodyExt;
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -437,5 +437,100 @@ mod tests {
         let (status, body) = post_chat(state, envelope).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body["error"].as_str().unwrap().contains("open failed"));
+    }
+
+    // ── HPKE chat channel interop fixtures ────────────────────────────────────
+    // The same fixture pattern as hpke_channel.rs: Rust generates its own
+    // vectors (request and response info strings separately); pnpm test
+    // generates the TS-side vectors; each side opens the other's.
+
+    use std::path::PathBuf;
+
+    fn fixtures_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+    }
+
+    fn generate_chat_fixture(path: &std::path::Path, info: &[u8], plaintext: &[u8]) {
+        let mut csprng = <rand::rngs::StdRng as rand::SeedableRng>::from_os_rng();
+        let (sk, pk) = Kem::gen_keypair(&mut csprng);
+        let (enc, ct) = seal(&pk.to_bytes(), info, plaintext).unwrap();
+        let fixture = json!({
+            "suite": {
+                "kem": "DHKEM(X25519, HKDF-SHA256)",
+                "kdf": "HKDF-SHA256",
+                "aead": "ChaCha20Poly1305",
+            },
+            "generator": "rust hpke v0.13",
+            "recipient_private_key": B64.encode(sk.to_bytes()),
+            "recipient_public_key": B64.encode(pk.to_bytes()),
+            "info": B64.encode(info),
+            "aad": "",
+            "plaintext": B64.encode(plaintext),
+            "enc": B64.encode(enc),
+            "ct": B64.encode(ct),
+        });
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_string_pretty(&fixture).unwrap()).unwrap();
+    }
+
+    fn open_chat_fixture(path: &std::path::Path, expected_info: &[u8]) {
+        let raw = std::fs::read_to_string(path).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let b64_field = |k: &str| B64.decode(fixture[k].as_str().unwrap()).unwrap();
+        let sk =
+            <Kem as KemTrait>::PrivateKey::from_bytes(&b64_field("recipient_private_key")).unwrap();
+        let info = b64_field("info");
+        assert_eq!(info, expected_info, "info string mismatch in {path:?}");
+        let plaintext = open(&sk, &b64_field("enc"), &info, &b64_field("ct"))
+            .unwrap_or_else(|e| panic!("failed to open {path:?}: {e}"));
+        assert_eq!(plaintext, b64_field("plaintext"), "plaintext mismatch in {path:?}");
+    }
+
+    #[test]
+    fn rust_chat_request_fixture_exists_and_opens_in_rust() {
+        let path = fixtures_dir().join("hpke-chat-request.json");
+        if !path.exists() {
+            generate_chat_fixture(
+                &path,
+                REQUEST_INFO,
+                b"hpke chat/request interop vector, sealed by the rust `hpke` crate",
+            );
+        }
+        open_chat_fixture(&path, REQUEST_INFO);
+    }
+
+    #[test]
+    fn rust_chat_response_fixture_exists_and_opens_in_rust() {
+        let path = fixtures_dir().join("hpke-chat-response.json");
+        if !path.exists() {
+            generate_chat_fixture(
+                &path,
+                RESPONSE_INFO,
+                b"hpke chat/response interop vector, sealed by the rust `hpke` crate",
+            );
+        }
+        open_chat_fixture(&path, RESPONSE_INFO);
+    }
+
+    #[test]
+    fn ts_generated_chat_request_fixture_opens_in_rust() {
+        let path = fixtures_dir().join("hpke-chat-request-ts.json");
+        assert!(
+            path.exists(),
+            "missing {path:?}: run `pnpm test` in frontend/ to generate it"
+        );
+        open_chat_fixture(&path, REQUEST_INFO);
+    }
+
+    #[test]
+    fn ts_generated_chat_response_fixture_opens_in_rust() {
+        let path = fixtures_dir().join("hpke-chat-response-ts.json");
+        assert!(
+            path.exists(),
+            "missing {path:?}: run `pnpm test` in frontend/ to generate it"
+        );
+        open_chat_fixture(&path, RESPONSE_INFO);
     }
 }

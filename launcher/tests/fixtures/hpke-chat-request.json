@@ -1,0 +1,15 @@
+{
+  "aad": "",
+  "ct": "ghypIK3u2ttkfEQqjYEfhjk87MTo/+BzKw8DDYu4T/7Eo11GwCG8HCFVu8hedAjfFWL0SavGhV90xLh1/JvwmgOD8dcPA/GmK12uzfsxqlPv",
+  "enc": "vivQlWOweFVpaKUaAwo1gpImpam2tIU66JObvx2xhAw=",
+  "generator": "rust hpke v0.13",
+  "info": "dGVlLWV4YW1wbGUvaHBrZS9jaGF0L3JlcXVlc3QvdjE=",
+  "plaintext": "aHBrZSBjaGF0L3JlcXVlc3QgaW50ZXJvcCB2ZWN0b3IsIHNlYWxlZCBieSB0aGUgcnVzdCBgaHBrZWAgY3JhdGU=",
+  "recipient_private_key": "hfsdrmwqfTo3ApkDL8ETET89jksMFjjzoNN36Qx8Izc=",
+  "recipient_public_key": "N6EUJc09SAouwWf1PsKUe1GdVbSRsbJ1I4oIwW0IRlQ=",
+  "suite": {
+    "aead": "ChaCha20Poly1305",
+    "kdf": "HKDF-SHA256",
+    "kem": "DHKEM(X25519, HKDF-SHA256)"
+  }
+}
