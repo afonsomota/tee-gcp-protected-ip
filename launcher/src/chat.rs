@@ -71,8 +71,13 @@ fn validate(messages: &[Message]) -> Result<(), String> {
     }
     // Error responses go back unencrypted; name the offending index, never
     // the decrypted value (see the invariant in `chat` below).
-    if let Some(i) = messages.iter().position(|m| m.role != "user" && m.role != "assistant") {
-        return Err(format!("message {i}: role must be \"user\" or \"assistant\""));
+    if let Some(i) = messages
+        .iter()
+        .position(|m| m.role != "user" && m.role != "assistant")
+    {
+        return Err(format!(
+            "message {i}: role must be \"user\" or \"assistant\""
+        ));
     }
     Ok(())
 }
@@ -97,7 +102,12 @@ pub async fn chat(State(state): State<AppState>, Json(envelope): Json<Envelope>)
     }
     let reply_pub = match B64.decode(&request.reply_pub) {
         Ok(k) => k,
-        Err(e) => return error(StatusCode::BAD_REQUEST, &format!("reply_pub is not valid base64: {e}")),
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                &format!("reply_pub is not valid base64: {e}"),
+            )
+        }
     };
     let reply = match complete(&upstream, &request.messages).await {
         Ok(r) => r,
@@ -122,7 +132,8 @@ fn decrypt_request(state: &AppState, envelope: &Envelope) -> Result<ChatRequest,
         .decode(&envelope.ct)
         .map_err(|e| format!("ct is not valid base64: {e}"))?;
     let plaintext = open(state.keys.hpke_private(), &enc, REQUEST_INFO, &ct)?;
-    serde_json::from_slice(&plaintext).map_err(|e| format!("request plaintext is not valid JSON: {e}"))
+    serde_json::from_slice(&plaintext)
+        .map_err(|e| format!("request plaintext is not valid JSON: {e}"))
 }
 
 /// One OpenAI-style chat completion against llama-server: the fixed system
@@ -179,7 +190,7 @@ mod tests {
     use axum::http::Request;
     use axum::routing::post;
     use axum::Router;
-    use hpke::{Kem as KemTrait, Serializable};
+    use hpke::{Deserializable, Kem as KemTrait, Serializable};
     use http_body_util::BodyExt;
     use std::sync::Arc;
     use tower::ServiceExt;
@@ -227,7 +238,10 @@ mod tests {
         format!("127.0.0.1:{}", addr.port())
     }
 
-    async fn post_chat(state: AppState, envelope: serde_json::Value) -> (StatusCode, serde_json::Value) {
+    async fn post_chat(
+        state: AppState,
+        envelope: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
         let response = crate::app(state)
             .oneshot(
                 Request::post("/chat")
@@ -255,15 +269,24 @@ mod tests {
             request.to_string().as_bytes(),
         )
         .unwrap();
-        (json!({ "enc": B64.encode(enc), "ct": B64.encode(ct) }), reply_sk)
+        (
+            json!({ "enc": B64.encode(enc), "ct": B64.encode(ct) }),
+            reply_sk,
+        )
     }
 
     /// A one-turn conversation: a single user message.
-    fn sealed_request(state: &AppState, msg: &str) -> (serde_json::Value, <Kem as KemTrait>::PrivateKey) {
+    fn sealed_request(
+        state: &AppState,
+        msg: &str,
+    ) -> (serde_json::Value, <Kem as KemTrait>::PrivateKey) {
         sealed_history(state, json!([{ "role": "user", "content": msg }]))
     }
 
-    fn open_reply(reply_sk: &<Kem as KemTrait>::PrivateKey, reply: &serde_json::Value) -> serde_json::Value {
+    fn open_reply(
+        reply_sk: &<Kem as KemTrait>::PrivateKey,
+        reply: &serde_json::Value,
+    ) -> serde_json::Value {
         let plaintext = open(
             reply_sk,
             &B64.decode(reply["enc"].as_str().unwrap()).unwrap(),
@@ -317,7 +340,10 @@ mod tests {
         let (envelope, _) = sealed_history(&state, json!([]));
         let (status, body) = post_chat(state, envelope).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body["error"].as_str().unwrap().contains("must not be empty"));
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("must not be empty"));
     }
 
     #[tokio::test]
@@ -339,7 +365,10 @@ mod tests {
         let error = body["error"].as_str().unwrap();
         assert!(error.contains("message 1"), "unexpected error: {error}");
         assert!(!error.contains("system"), "decrypted role leaked: {error}");
-        assert!(!error.contains("secret-injected"), "decrypted content leaked: {error}");
+        assert!(
+            !error.contains("secret-injected"),
+            "decrypted content leaked: {error}"
+        );
     }
 
     #[tokio::test]
@@ -408,5 +437,100 @@ mod tests {
         let (status, body) = post_chat(state, envelope).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body["error"].as_str().unwrap().contains("open failed"));
+    }
+
+    // ── HPKE chat channel interop fixtures ────────────────────────────────────
+    // The same fixture pattern as hpke_channel.rs: Rust generates its own
+    // vectors (request and response info strings separately); pnpm test
+    // generates the TS-side vectors; each side opens the other's.
+
+    use std::path::PathBuf;
+
+    fn fixtures_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+    }
+
+    fn generate_chat_fixture(path: &std::path::Path, info: &[u8], plaintext: &[u8]) {
+        let mut csprng = <rand::rngs::StdRng as rand::SeedableRng>::from_os_rng();
+        let (sk, pk) = Kem::gen_keypair(&mut csprng);
+        let (enc, ct) = seal(&pk.to_bytes(), info, plaintext).unwrap();
+        let fixture = json!({
+            "suite": {
+                "kem": "DHKEM(X25519, HKDF-SHA256)",
+                "kdf": "HKDF-SHA256",
+                "aead": "ChaCha20Poly1305",
+            },
+            "generator": "rust hpke v0.13",
+            "recipient_private_key": B64.encode(sk.to_bytes()),
+            "recipient_public_key": B64.encode(pk.to_bytes()),
+            "info": B64.encode(info),
+            "aad": "",
+            "plaintext": B64.encode(plaintext),
+            "enc": B64.encode(enc),
+            "ct": B64.encode(ct),
+        });
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_string_pretty(&fixture).unwrap()).unwrap();
+    }
+
+    fn open_chat_fixture(path: &std::path::Path, expected_info: &[u8]) {
+        let raw = std::fs::read_to_string(path).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let b64_field = |k: &str| B64.decode(fixture[k].as_str().unwrap()).unwrap();
+        let sk =
+            <Kem as KemTrait>::PrivateKey::from_bytes(&b64_field("recipient_private_key")).unwrap();
+        let info = b64_field("info");
+        assert_eq!(info, expected_info, "info string mismatch in {path:?}");
+        let plaintext = open(&sk, &b64_field("enc"), &info, &b64_field("ct"))
+            .unwrap_or_else(|e| panic!("failed to open {path:?}: {e}"));
+        assert_eq!(plaintext, b64_field("plaintext"), "plaintext mismatch in {path:?}");
+    }
+
+    #[test]
+    fn rust_chat_request_fixture_exists_and_opens_in_rust() {
+        let path = fixtures_dir().join("hpke-chat-request.json");
+        if !path.exists() {
+            generate_chat_fixture(
+                &path,
+                REQUEST_INFO,
+                b"hpke chat/request interop vector, sealed by the rust `hpke` crate",
+            );
+        }
+        open_chat_fixture(&path, REQUEST_INFO);
+    }
+
+    #[test]
+    fn rust_chat_response_fixture_exists_and_opens_in_rust() {
+        let path = fixtures_dir().join("hpke-chat-response.json");
+        if !path.exists() {
+            generate_chat_fixture(
+                &path,
+                RESPONSE_INFO,
+                b"hpke chat/response interop vector, sealed by the rust `hpke` crate",
+            );
+        }
+        open_chat_fixture(&path, RESPONSE_INFO);
+    }
+
+    #[test]
+    fn ts_generated_chat_request_fixture_opens_in_rust() {
+        let path = fixtures_dir().join("hpke-chat-request-ts.json");
+        assert!(
+            path.exists(),
+            "missing {path:?}: run `pnpm test` in frontend/ to generate it"
+        );
+        open_chat_fixture(&path, REQUEST_INFO);
+    }
+
+    #[test]
+    fn ts_generated_chat_response_fixture_opens_in_rust() {
+        let path = fixtures_dir().join("hpke-chat-response-ts.json");
+        assert!(
+            path.exists(),
+            "missing {path:?}: run `pnpm test` in frontend/ to generate it"
+        );
+        open_chat_fixture(&path, RESPONSE_INFO);
     }
 }

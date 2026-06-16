@@ -98,6 +98,9 @@ falsely (platform trust); model-output IP leakage (distillation).
    against a real domain still pending.
 5. **hpke-js / WebCrypto** interop with the Rust `hpke` crate (suite choice:
    X25519-HKDF-SHA256 / ChaCha20-Poly1305).
-6. **Weights provisioning**: Terraform/script downloads Gemma from HF with the
-   operator's token, encrypts, uploads to GCS (license-compliant — no
-   redistribution).
+6. **Weights provisioning**: ✅ resolved (issue #7) —
+   `scripts/provision-weights.py` downloads Gemma from HF with the operator's
+   token, envelope-encrypts (ChaCha20-Poly1305 STREAM, DEK wrapped by KMS),
+   uploads ciphertext to GCS (license-compliant — no plaintext
+   redistribution); the launcher decrypts onto a tmpfs only after attested
+   KMS key release pinned to the image digest.

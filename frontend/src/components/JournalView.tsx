@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { JournalDb } from "../lib/store";
 import { type JournalEntry, newEntry } from "../lib/types";
+import { ChatPane } from "./ChatPane";
 
 interface Props {
   db: JournalDb;
@@ -151,6 +152,8 @@ export function JournalView({ db, journalKey, onLock }: Props) {
           {status !== null && <span className="muted">{status}</span>}
         </div>
       </section>
+
+      <ChatPane />
     </div>
   );
 }

@@ -48,11 +48,9 @@ ENV LLAMA_ARG_HOST=127.0.0.1
 # variable: an operator who could set LLAMA_UPSTREAM would redirect decrypted
 # user messages outside the enclave (see llama.rs module docs).
 LABEL "tee.launch_policy.log_redirect"="always"
-# Env vars the operator may set via tee-env-* VM metadata (issue 004 TLS).
-# Deliberately narrow: only the ACME/TLS wiring is overridable, none of it
-# can weaken the user-privacy story (TLS is defense-in-depth; the trust
-# rides on HPKE + attestation), and none of it points at state — the ACME
-# account and cert are fresh per boot and live only in enclave memory.
-LABEL "tee.launch_policy.allow_env_override"="TLS_DOMAIN,ACME_CONTACT,ACME_DIRECTORY"
-EXPOSE 8080 443
+# Allow the operator's tee-mount tmpfs at /models: artifact delivery
+# (issue 007) decrypts the weights there so plaintext only ever exists in
+# SEV-SNP-encrypted guest memory, never on disk.
+LABEL "tee.launch_policy.allow_mount_destinations"="/models"
+EXPOSE 8080
 ENTRYPOINT ["/launcher"]

@@ -52,15 +52,28 @@ pub struct LlamaConfig {
     pub initial_backoff: Duration,
 }
 
+/// The loopback port llama-server will be told to bind, resolved from the
+/// environment the same way `LlamaConfig::from_env` does.
+fn port_from_env() -> u16 {
+    std::env::var("LLAMA_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(DEFAULT_PORT)
+}
+
+/// The `host:port` a supervised llama-server will serve on, before any model
+/// exists. Lets artifact delivery (artifacts.rs) hand `/chat` its upstream
+/// at boot while the model is still being fetched and decrypted.
+pub fn planned_upstream() -> String {
+    format!("127.0.0.1:{}", port_from_env())
+}
+
 impl LlamaConfig {
     fn from_env(model: String) -> Self {
         Self {
             bin: std::env::var("LLAMA_SERVER_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()),
             model,
-            port: std::env::var("LLAMA_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(DEFAULT_PORT),
+            port: port_from_env(),
             extra_args: std::env::var("LLAMA_EXTRA_ARGS")
                 .map(|a| a.split_whitespace().map(str::to_string).collect())
                 .unwrap_or_default(),
@@ -97,10 +110,7 @@ pub fn init_from_env(dev: bool) -> Option<String> {
     // weights are baked into the image.
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
     if let Some(model) = env("LLAMA_MODEL_PATH") {
-        let config = LlamaConfig::from_env(model);
-        let upstream = config.upstream();
-        supervise(config);
-        Some(upstream)
+        Some(start(model))
     } else if let Some(upstream) = env("LLAMA_UPSTREAM") {
         // An external upstream receives decrypted user messages, so the
         // audited TCB must never honor it in production (see module docs).
@@ -114,6 +124,16 @@ pub fn init_from_env(dev: bool) -> Option<String> {
         println!("inference: not configured (set LLAMA_MODEL_PATH or LLAMA_UPSTREAM); /chat will serve 503");
         None
     }
+}
+
+/// Supervise a llama-server on the given model file and return the
+/// `host:port` it will serve on. Called at boot when weights are baked into
+/// the image, or after artifact delivery has decrypted them onto tmpfs.
+pub fn start(model: String) -> String {
+    let config = LlamaConfig::from_env(model);
+    let upstream = config.upstream();
+    supervise(config);
+    upstream
 }
 
 /// Spawn the supervision loop and a one-shot readiness probe that logs the
@@ -192,8 +212,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("runs.log");
         let script = dir.join("fake-llama-server.sh");
-        std::fs::write(&script, format!("#!/bin/sh\necho run >> {}\nexit 1\n", log.display()))
-            .unwrap();
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\necho run >> {}\nexit 1\n", log.display()),
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let config = LlamaConfig {

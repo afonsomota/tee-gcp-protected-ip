@@ -27,7 +27,12 @@ export type FailureCode =
   | "TOKEN_SIGNATURE_INVALID"
   | "CHALLENGE_MISMATCH"
   | "IMAGE_DIGEST_MISMATCH"
-  | "KEY_HASH_MISMATCH";
+  | "DIGEST_UNCONFIGURED"
+  | "KEY_HASH_MISMATCH"
+  // Thrown by session.ts (runAttestation), not by this module:
+  | "ATTESTATION_FETCH_FAILED"
+  | "KEY_FETCH_FAILED"
+  | "DEV_TOKEN_REJECTED";
 
 export class AttestationError extends Error {
   readonly code: FailureCode;
@@ -107,6 +112,12 @@ export interface ClaimChecks {
  * Throws AttestationError with a distinct code per failure mode.
  */
 export async function checkClaims(claims: AttestationClaims, checks: ClaimChecks): Promise<void> {
+  if (!checks.expectedImageDigest) {
+    throw new AttestationError(
+      "DIGEST_UNCONFIGURED",
+      "VITE_EXPECTED_IMAGE_DIGEST is not set — deploy with a pinned digest to enable full verification",
+    );
+  }
   const nonces = eatNonces(claims);
   if (!nonces.includes(checks.challenge)) {
     throw new AttestationError(
