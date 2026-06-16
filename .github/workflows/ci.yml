@@ -32,11 +32,22 @@ jobs:
 
       - name: Set up Rust (stable)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # The harness (issue #8) compiles to wasm; the launcher loads it.
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: launcher
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Build + sign the harness fixture
+        # Rebuild harness.wasm + signature from current source so the tests
+        # always run against the live harness, never a stale committed blob.
+        run: ../scripts/build-harness.sh
 
       - name: Test
         run: cargo test

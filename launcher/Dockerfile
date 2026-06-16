@@ -6,7 +6,8 @@
 # Build with:
 #   docker buildx build --platform linux/amd64 \
 #     [--build-arg MODEL_URL=https://...gguf] -t <tag> launcher/
-FROM --platform=$BUILDPLATFORM rust:1.88-alpine AS build
+# Rust 1.94+: wasmtime 45 (embedded for the issue #8 harness sandbox) needs 1.93.
+FROM --platform=$BUILDPLATFORM rust:1.94-alpine AS build
 RUN apk add --no-cache musl-dev
 RUN rustup target add x86_64-unknown-linux-musl
 WORKDIR /src
@@ -16,7 +17,6 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
     && cargo build --release --target x86_64-unknown-linux-musl \
     && rm -rf src
 COPY src ./src
-COPY prompts ./prompts
 RUN touch src/main.rs && cargo build --release --target x86_64-unknown-linux-musl
 
 # Optionally bake chat-model weights into the image (issue 006 allows

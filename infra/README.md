@@ -205,9 +205,15 @@ terraform -chdir=infra/bootstrap apply -var project_id=YOUR_PROJECT_ID \
 # Encrypt + upload the weights; prints the weights_object to set
 ./scripts/provision-weights.py --project YOUR_PROJECT_ID
 
-# Add it to infra/terraform.tfvars and (re)apply — make deploy only passes
+# Build + sign the harness, then encrypt + upload it the same way (issue #8);
+# prints the harness_object to set. Rides the same KMS key — no extra grant.
+./scripts/build-harness.sh
+./scripts/provision-harness.py --project YOUR_PROJECT_ID
+
+# Add both to infra/terraform.tfvars and (re)apply — make deploy only passes
 # project_id and image_digest, the rest auto-loads from tfvars
 echo 'weights_object = "weights/gemma-4-E2B_q4_0-it.gguf.manifest.json"' >> infra/terraform.tfvars
+echo 'harness_object = "harness/harness.wasm.manifest.json"' >> infra/terraform.tfvars
 terraform -chdir=infra apply
 ```
 
@@ -483,6 +489,11 @@ terraform -chdir=infra/bootstrap apply -var project_id=YOUR_PROJECT_ID \
 #     value used in step 4)
 ./scripts/provision-weights.py --project YOUR_PROJECT_ID
 
+# 2c. Build + sign + provision the encrypted harness (issue #8; idempotent;
+#     prints the harness_object value used in step 4)
+./scripts/build-harness.sh
+./scripts/provision-harness.py --project YOUR_PROJECT_ID
+
 # 3. Build & push the workload image, capture its digest
 gcloud auth configure-docker europe-west4-docker.pkg.dev
 docker buildx build --platform linux/amd64 \
@@ -500,6 +511,7 @@ cat > infra/terraform.tfvars <<EOF
 project_id     = "YOUR_PROJECT_ID"
 image_digest   = "$DIGEST"
 weights_object = "weights/gemma-4-E2B_q4_0-it.gguf.manifest.json"  # from step 2b
+harness_object = "harness/harness.wasm.manifest.json"              # from step 2c
 EOF
 terraform -chdir=infra apply
 

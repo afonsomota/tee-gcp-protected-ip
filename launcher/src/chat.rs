@@ -14,9 +14,10 @@
 //! state lives only on the client (no server-side persistence of user
 //! content), so each request carries the whole history; the launcher holds
 //! it in memory only for the duration of the request. The decrypted history
-//! is run against the supervised llama-server (`llama.rs`) behind a fixed
-//! system prompt — prompt construction moves to the sandboxed harness in
-//! issue 008. Response plaintext, sealed to `reply_pub`:
+//! is handed to the sandboxed wasm harness (`harness.rs`), which owns the
+//! prompt orchestration and calls the supervised llama-server; the launcher
+//! itself no longer constructs the prompt. Response plaintext, sealed to
+//! `reply_pub`:
 //!
 //! ```json
 //! {"reply": "<model-generated utf-8 text>"}
@@ -24,8 +25,6 @@
 //!
 //! Plaintext exists only inside this handler; the model's input and output
 //! never leave the enclave unencrypted.
-
-use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -40,13 +39,6 @@ use crate::AppState;
 
 pub const REQUEST_INFO: &[u8] = b"tee-example/hpke/chat/request/v1";
 pub const RESPONSE_INFO: &[u8] = b"tee-example/hpke/chat/response/v1";
-
-/// Fixed for this slice; the harness (issue 008) takes over prompting.
-/// Edit `launcher/prompts/system.txt` to change it (embedded at compile time).
-const SYSTEM_PROMPT: &str = include_str!("../prompts/system.txt").trim_ascii();
-
-/// CPU inference is slow; give a long-prompt completion room to finish.
-const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Deserialize)]
 struct ChatRequest {
@@ -89,6 +81,14 @@ pub async fn chat(State(state): State<AppState>, Json(envelope): Json<Envelope>)
             "inference not configured: no model loaded in this launcher",
         );
     };
+    let Some(harness) = state.harness.get() else {
+        // Delivery + signature verification hasn't completed (or failed); the
+        // same "errors until ready" window as artifact-delivered weights.
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "harness not ready: signed orchestration not yet loaded",
+        );
+    };
     // Decrypt and validate before touching the model. Error strings up to
     // and including decryption describe only attacker-supplied ciphertext
     // (bad base64, bad envelope) — never decrypted content. Keep that
@@ -97,6 +97,8 @@ pub async fn chat(State(state): State<AppState>, Json(envelope): Json<Envelope>)
         Ok(r) => r,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
+    // Defense in depth: reject client-smuggled roles before the sandbox ever
+    // sees them, even though the harness re-derives the system prompt itself.
     if let Err(message) = validate(&request.messages) {
         return error(StatusCode::BAD_REQUEST, &message);
     }
@@ -109,12 +111,20 @@ pub async fn chat(State(state): State<AppState>, Json(envelope): Json<Envelope>)
             )
         }
     };
-    let reply = match complete(&upstream, &request.messages).await {
-        Ok(r) => r,
-        Err(message) => return error(StatusCode::BAD_GATEWAY, &message),
+    // Hand the validated history to the sandboxed harness; it builds the
+    // prompt and produces the reply JSON, which we seal verbatim. The harness
+    // can only call back into the enclave-local model (no other capability).
+    let context = json!({ "messages": request.messages }).to_string();
+    let reply_plaintext = match harness.run(&upstream, context.as_bytes()).await {
+        Ok(bytes) => bytes,
+        // harness.run errors carry no plaintext; keep the client message
+        // generic and let the (status/len-only) detail go to logs.
+        Err(detail) => {
+            eprintln!("chat: harness run failed: {detail}");
+            return error(StatusCode::BAD_GATEWAY, "inference failed");
+        }
     };
-    let reply_plaintext = json!({ "reply": reply }).to_string();
-    match seal(&reply_pub, RESPONSE_INFO, reply_plaintext.as_bytes()) {
+    match seal(&reply_pub, RESPONSE_INFO, &reply_plaintext) {
         Ok((enc, ct)) => Json(Envelope {
             enc: B64.encode(enc),
             ct: B64.encode(ct),
@@ -136,48 +146,6 @@ fn decrypt_request(state: &AppState, envelope: &Envelope) -> Result<ChatRequest,
         .map_err(|e| format!("request plaintext is not valid JSON: {e}"))
 }
 
-/// One OpenAI-style chat completion against llama-server: the fixed system
-/// prompt followed by the client's whole history.
-async fn complete(upstream: &str, history: &[Message]) -> Result<String, String> {
-    let mut messages = vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
-    messages.extend(history.iter().map(|m| serde_json::to_value(m).unwrap()));
-    let body = json!({
-        "messages": messages,
-        "max_tokens": 512,
-    })
-    .to_string();
-    let (status, response) = tokio::time::timeout(
-        UPSTREAM_TIMEOUT,
-        crate::upstream::request(
-            upstream,
-            hyper::Method::POST,
-            "/v1/chat/completions",
-            Some(body),
-        ),
-    )
-    .await
-    .map_err(|_| format!("inference timed out after {UPSTREAM_TIMEOUT:?}"))?
-    .map_err(|e| format!("inference upstream unreachable: {e}"))?;
-    if !status.is_success() {
-        // llama-server error bodies can echo prompt fragments (context
-        // overflow, template errors). Relaying the body would send user
-        // plaintext to the network; logging it would land it in Cloud
-        // Logging (log_redirect=always), readable by the operator. Status
-        // and length only, on both paths.
-        eprintln!(
-            "inference: upstream returned {status} ({}-byte body withheld)",
-            response.len()
-        );
-        return Err(format!("inference upstream returned {status}"));
-    }
-    let completion: serde_json::Value = serde_json::from_slice(&response)
-        .map_err(|e| format!("inference upstream returned invalid JSON: {e}"))?;
-    completion["choices"][0]["message"]["content"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| "inference upstream response had no message content".to_string())
-}
-
 fn error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
@@ -185,6 +153,9 @@ fn error(status: StatusCode, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Shared with harness.rs's tests; chat asserts only on the non-system
+    // turns it sent, so it forwards `false` to the mock.
+    use crate::test_support::{fixture_file, mock_llama};
     use crate::keys::EnclaveKeys;
     use axum::body::Body;
     use axum::http::Request;
@@ -202,40 +173,19 @@ mod tests {
             keys: Arc::new(EnclaveKeys::generate()),
             dev: false,
             inference,
+            harness: Arc::new(load_fixture_harness()),
         }
     }
 
-    /// Serve an OpenAI-shaped completion (echoing every non-system message it
-    /// received back inside the reply) on an ephemeral loopback port.
-    async fn mock_llama_server() -> String {
-        async fn completions(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
-            let seen: Vec<String> = body["messages"]
-                .as_array()
-                .map(|messages| {
-                    messages
-                        .iter()
-                        .filter(|m| m["role"] != "system")
-                        .map(|m| {
-                            format!(
-                                "{}: {}",
-                                m["role"].as_str().unwrap_or_default(),
-                                m["content"].as_str().unwrap_or_default()
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Json(json!({
-                "choices": [
-                    { "message": { "role": "assistant", "content": format!("model saw [{}]", seen.join(" | ")) } }
-                ]
-            }))
-        }
-        let app = Router::new().route("/v1/chat/completions", post(completions));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("127.0.0.1:{}", addr.port())
+    /// Load the committed, signed harness fixture into a ready slot so `/chat`
+    /// routes through the real wasm module (built by scripts/build-harness.sh).
+    fn load_fixture_harness() -> crate::harness::HarnessSlot {
+        let harness = crate::harness::Harness::new(
+            &fixture_file("harness.wasm"),
+            &fixture_file("harness.wasm.sig"),
+        )
+        .expect("fixture harness should verify");
+        crate::harness::HarnessSlot::loaded(Arc::new(harness))
     }
 
     async fn post_chat(
@@ -299,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_roundtrips_an_encrypted_model_reply() {
-        let upstream = mock_llama_server().await;
+        let upstream = mock_llama(false).await;
         let state = test_state(Some(upstream));
         let (envelope, reply_sk) = sealed_request(&state, "how was my week?");
 
@@ -312,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_forwards_the_full_history_in_order() {
-        let upstream = mock_llama_server().await;
+        let upstream = mock_llama(false).await;
         let state = test_state(Some(upstream));
         let (envelope, reply_sk) = sealed_history(
             &state,
@@ -335,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_rejects_an_empty_history() {
-        let upstream = mock_llama_server().await;
+        let upstream = mock_llama(false).await;
         let state = test_state(Some(upstream));
         let (envelope, _) = sealed_history(&state, json!([]));
         let (status, body) = post_chat(state, envelope).await;
@@ -351,7 +301,7 @@ mod tests {
         // The system prompt belongs to the launcher; a client-supplied
         // "system" role is rejected, and the unencrypted error names the
         // index but never the decrypted content.
-        let upstream = mock_llama_server().await;
+        let upstream = mock_llama(false).await;
         let state = test_state(Some(upstream));
         let (envelope, _) = sealed_history(
             &state,
@@ -391,7 +341,9 @@ mod tests {
         let (envelope, _) = sealed_request(&state, "hello");
         let (status, body) = post_chat(state, envelope).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert!(body["error"].as_str().unwrap().contains("unreachable"));
+        // The harness signals failure with an empty reply; the client sees a
+        // generic message (the upstream detail goes only to logs).
+        assert_eq!(body["error"], "inference failed");
     }
 
     #[tokio::test]
@@ -415,14 +367,15 @@ mod tests {
         let (status, body) = post_chat(state, envelope).await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         let error = body["error"].as_str().unwrap();
-        assert!(error.contains("returned 500"), "unexpected error: {error}");
+        // Generic message, and crucially no echoed prompt fragment.
+        assert_eq!(error, "inference failed");
         assert!(!error.contains(SENTINEL), "upstream body leaked: {error}");
     }
 
     #[tokio::test]
     async fn chat_rejects_envelope_sealed_with_echo_info_string() {
         // Domain separation: an /hpke/echo request must not decrypt as /chat.
-        let upstream = mock_llama_server().await;
+        let upstream = mock_llama(false).await;
         let state = test_state(Some(upstream));
         let mut csprng = <rand::rngs::StdRng as rand::SeedableRng>::from_os_rng();
         let (_, reply_pk) = Kem::gen_keypair(&mut csprng);

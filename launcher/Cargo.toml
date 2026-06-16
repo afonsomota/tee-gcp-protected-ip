@@ -31,9 +31,15 @@ axum-server = "0.8"
 async-trait = "0.1"
 futures-util = { version = "0.3", default-features = false }
 pem = "3"
+wasmtime = { version = "45.0.2", default-features = false, features = ["cranelift", "runtime", "async", "wat"] }
+ed25519-dalek = "2.2.0"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# test-util only: lets the artifact retry tests pause tokio's clock so the
+# FETCH_ATTEMPTS backoff doesn't actually sleep. Dev-only — never compiled
+# into the release image (cargo excludes dev-dependencies from `--release`).
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 strip = true

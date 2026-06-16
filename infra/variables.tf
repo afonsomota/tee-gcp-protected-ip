@@ -69,6 +69,21 @@ variable "weights_object" {
   default     = null
 }
 
+variable "harness_object" {
+  description = <<-EOT
+    GCS object name of the encrypted-harness manifest inside the artifacts
+    bucket (e.g. "harness/harness.wasm.manifest.json"), as printed by
+    scripts/provision-harness.py. Put it in infra/terraform.tfvars alongside
+    weights_object. The harness rides the same KMS-gated pipeline as the
+    weights (shared bucket, KMS key, and workload-identity audience), so no
+    separate decrypt grant is needed.
+    null or "" disables harness delivery: no harness metadata on the CVM, so
+    /chat serves 503 (the launcher will not run unsigned/undelivered code).
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "weights_tmpfs_bytes" {
   description = <<-EOT
     Size of the in-memory tmpfs Confidential Space mounts at /models for the
