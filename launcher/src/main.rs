@@ -39,9 +39,12 @@ pub struct AppState {
     /// Dev mode: serve an *unsigned* attestation-shaped token (see
     /// `keys::EnclaveKeys::dev_token`) so the frontend can run locally.
     pub dev: bool,
-    /// `host:port` of the llama-server `/chat` proxies to (see `llama.rs`);
+    /// `host:port` of the chat llama-server `/chat` proxies to (see `llama.rs`);
     /// `None` when no model is configured.
     pub inference: Option<String>,
+    /// `host:port` of the embedding llama-server for enclave tools (issue #11);
+    /// `None` when no embedding model is configured.
+    pub embedding: Option<String>,
     /// The signed, sandboxed wasm harness (issue #8) that owns prompt
     /// orchestration. Filled asynchronously after delivery + signature check;
     /// `/chat` serves 503 until it is ready (see `harness.rs`).
@@ -71,10 +74,17 @@ async fn main() {
         || std::env::var("LAUNCHER_DEV").is_ok_and(|v| v == "1");
     // Attestation-gated weights delivery (artifacts.rs) wins over an
     // image-baked model; both end in the same supervised llama-server.
-    let inference = match artifacts::init(dev).await {
-        Some(upstream) => Some(upstream),
-        None => llama::init_from_env(dev),
+    let inference_config = if let Some(chat_upstream) = artifacts::init(dev).await {
+        llama::init_from_env(dev).map(|config| llama::InferenceConfig {
+            chat: chat_upstream,
+            embedding: config.embedding,
+        })
+    } else {
+        llama::init_from_env(dev)
     };
+    let (inference, embedding) = inference_config
+        .map(|c| (Some(c.chat), c.embedding))
+        .unwrap_or((None, None));
     // The harness rides issue #7's delivery pipeline (signed + encrypted), so
     // it can lag boot; start the (backgrounded) load and hand `/chat` a slot
     // that fills when the verified module is ready.
@@ -84,6 +94,7 @@ async fn main() {
         keys: Arc::new(keys::EnclaveKeys::generate()),
         dev,
         inference,
+        embedding,
         harness: harness_slot,
     };
     println!(
@@ -233,6 +244,7 @@ mod tests {
             keys: Arc::new(keys::EnclaveKeys::generate()),
             dev,
             inference: None,
+            embedding: None,
             harness: Arc::new(harness::HarnessSlot::empty()),
         }
     }

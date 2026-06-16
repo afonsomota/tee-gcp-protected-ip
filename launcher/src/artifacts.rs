@@ -167,11 +167,11 @@ pub async fn init(dev: bool) -> Option<String> {
         "weights: delivering gs://{}/{} (KMS {})",
         config.bucket, config.object, config.kms_key
     );
-    let upstream = crate::llama::planned_upstream();
+    let upstream = crate::llama::planned_chat_upstream();
     tokio::spawn(async move {
         match deliver_with_retries(&WEIGHTS, || deliver(&config)).await {
             Some(path) => {
-                crate::llama::start(path);
+                crate::llama::start_chat(path);
             }
             None => eprintln!("weights: giving up; /chat will keep failing"),
         }

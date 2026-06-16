@@ -8,12 +8,13 @@
 //! declaration before the call is allowed to leave the enclave.
 //!
 //! Issue #10 ships the *client* locus with two data-bound tools:
-//!   * `search_entries`  — keyword/metadata search over the browser's IndexedDB
+//!   * `search_entries`  — keyword/metadata/vector similarity search over IndexedDB
 //!   * `attach_metadata` — write harness-provided enrichment into local storage
 //!
-//! The enclave locus (model-bound `embed`/`summarize`/`extract_metadata`)
-//! arrives in issue #11; `Locus` is already here so the manifest and the
-//! routing don't have to change shape when it does.
+//! Issue #11 adds the enclave locus (model-bound tools executed in-enclave):
+//!   * `embed(text)`                   — embed text to vector via EmbeddingGemma
+//!   * `summarize(text)`               — generate short summary via chat model
+//!   * `extract_metadata(text)`        — extract emotions/situations/life phases
 //!
 //! Validation is deliberately lightweight — name membership, locus, and the
 //! presence of each declared required argument — so the audited TCB carries no
@@ -55,9 +56,9 @@ const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "search_entries",
         description: "Search the user's locally stored journal entries by \
-                      keywords and metadata filters; returns only the matched \
-                      entries (top-k). The only path by which entries enter \
-                      enclave memory — on-demand data minimization.",
+                      keywords, metadata filters, and vector similarity; \
+                      returns only the matched entries (top-k). The only path \
+                      by which entries enter enclave memory — on-demand data minimization.",
         locus: Locus::Client,
         required: &["query"],
     },
@@ -68,6 +69,28 @@ const TOOLS: &[ToolSpec] = &[
                       encrypted journal entry.",
         locus: Locus::Client,
         required: &["entry_id", "enrichment"],
+    },
+    ToolSpec {
+        name: "embed",
+        description: "Embed text to a vector via the local EmbeddingGemma model \
+                      for use in similarity search. Returns a float array.",
+        locus: Locus::Enclave,
+        required: &["text"],
+    },
+    ToolSpec {
+        name: "summarize",
+        description: "Generate a short (1-2 sentence) summary of the given text \
+                      using the chat model. Returns a string.",
+        locus: Locus::Enclave,
+        required: &["text"],
+    },
+    ToolSpec {
+        name: "extract_metadata",
+        description: "Extract structured metadata (emotions, situations, life \
+                      phases) from the given text using the chat model with \
+                      specialized prompting. Returns an object with string arrays.",
+        locus: Locus::Enclave,
+        required: &["text"],
     },
 ];
 
@@ -114,6 +137,11 @@ pub fn manifest_json() -> Value {
                             "type": "integer",
                             "description": "Maximum number of entries to return (top-k). Defaults to 5.",
                         },
+                        "embedding": {
+                            "type": "array",
+                            "items": { "type": "number" },
+                            "description": "Optional embedding vector for similarity search. If present, returned entries are ranked by cosine similarity to this vector.",
+                        },
                     },
                     "required": ["query"],
                 },
@@ -137,6 +165,51 @@ pub fn manifest_json() -> Value {
                     "required": ["entry_id", "enrichment"],
                 },
             },
+            {
+                "name": "embed",
+                "description": lookup("embed").unwrap().description,
+                "locus": Locus::Enclave,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Text to embed.",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            },
+            {
+                "name": "summarize",
+                "description": lookup("summarize").unwrap().description,
+                "locus": Locus::Enclave,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Text to summarize.",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            },
+            {
+                "name": "extract_metadata",
+                "description": lookup("extract_metadata").unwrap().description,
+                "locus": Locus::Enclave,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Text to extract metadata from.",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            },
         ],
     })
 }
@@ -146,10 +219,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn known_tool_with_required_args_validates() {
+    fn known_client_tool_validates() {
         let spec = validate_call("search_entries", &json!({ "query": "Mochi" })).unwrap();
         assert_eq!(spec.name, "search_entries");
         assert_eq!(spec.locus, Locus::Client);
+    }
+
+    #[test]
+    fn known_enclave_tool_validates() {
+        let spec = validate_call("embed", &json!({ "text": "hello" })).unwrap();
+        assert_eq!(spec.name, "embed");
+        assert_eq!(spec.locus, Locus::Enclave);
     }
 
     #[test]

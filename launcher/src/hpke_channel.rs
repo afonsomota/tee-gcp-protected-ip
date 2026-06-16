@@ -163,6 +163,7 @@ mod tests {
             keys: Arc::new(EnclaveKeys::generate()),
             dev: false,
             inference: None,
+            embedding: None,
             harness: Arc::new(crate::harness::HarnessSlot::empty()),
         }
     }

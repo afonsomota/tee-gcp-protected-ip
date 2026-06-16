@@ -18,12 +18,19 @@
 //! prompt orchestration and calls the supervised llama-server; the launcher
 //! itself no longer constructs the prompt.
 //!
-//! # Tool loop (issue #10)
+//! # Tool loop (issues #10 and #11)
 //!
-//! The harness may ask the *client* to run a tool instead of replying. The
-//! request carries an optional `tool_results` array — the output of the tool
-//! calls the harness asked for on the previous round — so the (stateless)
-//! launcher can replay the loop each turn:
+//! The harness may ask the launcher to run a tool instead of replying. There
+//! are two types:
+//!
+//! - *Client tools* (issue #10): executed by the browser over local data.
+//!   The launcher returns them to the client via HPKE.
+//! - *Enclave tools* (issue #11): executed in-enclave using the models.
+//!   The launcher executes them immediately and includes results in the next
+//!   harness turn.
+//!
+//! The request carries an optional `tool_results` array — the output of tool
+//! calls the harness asked for on the previous round:
 //!
 //! ```json
 //! {
@@ -40,11 +47,11 @@
 //! {"tool_calls": [{"id": "...", "name": "...", "arguments": <json>}]}
 //! ```
 //!
-//! Crucially, the launcher re-validates every `tool_calls` entry the harness
-//! emits against its own manifest (`tools.rs`) before sealing it: the harness
-//! is untrusted, so it must not be able to ask the client to run an undeclared
-//! capability. Plaintext exists only inside this handler; the model's input
-//! and output never leave the enclave unencrypted.
+//! The launcher re-validates every `tool_calls` entry the harness emits
+//! against its own manifest (`tools.rs`) before sealing it (for client tools)
+//! or executing it (for enclave tools): the harness is untrusted.
+//! Plaintext exists only inside this handler; the model's input and output
+//! never leave the enclave unencrypted.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -73,18 +80,27 @@ struct ChatRequest {
     reply_pub: String,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct Message {
     role: String,
     content: String,
 }
 
 /// One client-executed tool result, echoed back for the next harness turn.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct ToolResult {
     id: String,
     name: String,
     result: serde_json::Value,
+}
+
+/// A tool call the harness emitted, validated but not yet executed.
+#[derive(Debug, Serialize)]
+struct ValidatedToolCall {
+    id: String,
+    name: String,
+    arguments: serde_json::Value,
+    locus: crate::tools::Locus,
 }
 
 /// The system prompt is the launcher's (and later the harness's), never the
@@ -144,40 +160,104 @@ pub async fn chat(State(state): State<AppState>, Json(envelope): Json<Envelope>)
             )
         }
     };
-    // Hand the validated history, any prior tool results, and the manifest to
-    // the sandboxed harness; it either replies or asks the client to run a
-    // tool. The harness can only call back into the enclave-local model (no
-    // other capability).
-    let context = json!({
-        "messages": request.messages,
-        "tool_results": request.tool_results,
-        "tools": crate::tools::manifest_json(),
-    })
-    .to_string();
-    let reply_plaintext = match harness.run(&upstream, context.as_bytes()).await {
-        Ok(bytes) => bytes,
-        // harness.run errors carry no plaintext; keep the client message
-        // generic and let the (status/len-only) detail go to logs.
-        Err(detail) => {
-            eprintln!("chat: harness run failed: {detail}");
-            return error(StatusCode::BAD_GATEWAY, "inference failed");
-        }
-    };
-    // The harness is untrusted: gate any tool calls it emits against the
-    // manifest before they can reach the client. A bad call is the harness's
-    // fault, not the client's — log the (manifest-only, no user data) detail
-    // and serve a generic 502.
-    if let Err(detail) = validate_harness_output(&reply_plaintext) {
-        eprintln!("chat: harness output rejected: {detail}");
-        return error(StatusCode::BAD_GATEWAY, "inference failed");
-    }
-    match seal(&reply_pub, RESPONSE_INFO, &reply_plaintext) {
-        Ok((enc, ct)) => Json(Envelope {
-            enc: B64.encode(enc),
-            ct: B64.encode(ct),
+
+    // Tool execution loop: the harness may emit enclave tools, which we execute
+    // immediately and feed back to the harness for the next turn. Client tools
+    // are returned to the browser for execution. Loop until the harness produces
+    // either a final reply or only client tools (no enclave tools).
+    let messages = request.messages.clone();
+    let mut tool_results = request.tool_results.clone();
+
+    loop {
+        let context = json!({
+            "messages": messages,
+            "tool_results": tool_results,
+            "tools": crate::tools::manifest_json(),
         })
-        .into_response(),
-        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+        .to_string();
+
+        let reply_plaintext = match harness.run(&upstream, context.as_bytes()).await {
+            Ok(bytes) => bytes,
+            Err(detail) => {
+                eprintln!("chat: harness run failed: {detail}");
+                return error(StatusCode::BAD_GATEWAY, "inference failed");
+            }
+        };
+
+        // Parse and validate the harness output
+        let reply = match validate_harness_reply(&reply_plaintext) {
+            Ok(r) => r,
+            Err(detail) => {
+                eprintln!("chat: harness output rejected: {detail}");
+                return error(StatusCode::BAD_GATEWAY, "inference failed");
+            }
+        };
+
+        match reply {
+            // Final reply: seal and return
+            Ok(reply_text) => {
+                let reply_json = json!({ "reply": reply_text });
+                match seal(&reply_pub, RESPONSE_INFO, reply_json.to_string().as_bytes()) {
+                    Ok((enc, ct)) => {
+                        return Json(Envelope {
+                            enc: B64.encode(enc),
+                            ct: B64.encode(ct),
+                        })
+                        .into_response()
+                    }
+                    Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+                }
+            }
+            // Tool calls: separate by locus
+            Err(tool_calls) => {
+                let (enclave_tools, client_tools): (Vec<_>, Vec<_>) =
+                    tool_calls.iter().partition(|t| t.locus == crate::tools::Locus::Enclave);
+
+                // Execute all enclave tools immediately and collect results
+                let mut enclave_results = Vec::new();
+                for tool in &enclave_tools {
+                    let result = execute_enclave_tool(&state, tool).await;
+                    enclave_results.push(ToolResult {
+                        id: tool.id.clone(),
+                        name: tool.name.clone(),
+                        result,
+                    });
+                }
+
+                // If we have enclave tools, add their results to the loop and continue
+                if !enclave_tools.is_empty() {
+                    tool_results.extend(enclave_results);
+                    continue;
+                }
+
+                // No enclave tools; return client tools to the browser
+                if !client_tools.is_empty() {
+                    let tool_calls_response = json!({
+                        "tool_calls": client_tools
+                            .iter()
+                            .map(|t| json!({
+                                "id": t.id,
+                                "name": t.name,
+                                "arguments": t.arguments,
+                            }))
+                            .collect::<Vec<_>>()
+                    });
+                    match seal(&reply_pub, RESPONSE_INFO, tool_calls_response.to_string().as_bytes()) {
+                        Ok((enc, ct)) => {
+                            return Json(Envelope {
+                                enc: B64.encode(enc),
+                                ct: B64.encode(ct),
+                            })
+                            .into_response()
+                        }
+                        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+                    }
+                }
+
+                // Should not reach here (harness output validation ensures non-empty tool_calls)
+                return error(StatusCode::BAD_GATEWAY, "inference failed");
+            }
+        }
     }
 }
 
@@ -193,20 +273,22 @@ fn decrypt_request(state: &AppState, envelope: &Envelope) -> Result<ChatRequest,
         .map_err(|e| format!("request plaintext is not valid JSON: {e}"))
 }
 
-/// Enforce the manifest on the harness's reply JSON. A `{"reply": ...}` answer
-/// passes through; a `{"tool_calls": [...]}` request is accepted only if every
-/// call names a manifest tool, is well-formed, and runs on the client locus
-/// (enclave-locus tools arrive in issue #11 and are executed in-enclave, never
-/// handed to the browser). Anything else is rejected so an undeclared or
-/// malformed capability can't reach the user's device.
-fn validate_harness_output(bytes: &[u8]) -> Result<(), String> {
+/// Parse and validate the harness's reply. Returns either a plain reply text
+/// or validated tool calls (separated by locus). Both client and enclave tools
+/// must pass manifest validation.
+fn validate_harness_reply(
+    bytes: &[u8],
+) -> Result<
+    std::result::Result<String, Vec<ValidatedToolCall>>,
+    String,
+> {
     let output: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|e| format!("harness reply is not JSON: {e}"))?;
 
     let Some(tool_calls) = output.get("tool_calls") else {
         // No tool calls: must be a plain reply.
-        if output.get("reply").and_then(|r| r.as_str()).is_some() {
-            return Ok(());
+        if let Some(reply) = output.get("reply").and_then(|r| r.as_str()) {
+            return Ok(Ok(reply.to_string()));
         }
         return Err("harness reply has neither \"reply\" nor \"tool_calls\"".to_string());
     };
@@ -217,20 +299,197 @@ fn validate_harness_output(bytes: &[u8]) -> Result<(), String> {
     if calls.is_empty() {
         return Err("harness emitted an empty \"tool_calls\" array".to_string());
     }
+
+    let mut validated = Vec::new();
     for call in calls {
+        let id = call
+            .get("id")
+            .and_then(|i| i.as_str())
+            .ok_or("tool call missing a string \"id\"")?
+            .to_string();
         let name = call
             .get("name")
             .and_then(|n| n.as_str())
             .ok_or("tool call missing a string \"name\"")?;
         let arguments = call.get("arguments").unwrap_or(&serde_json::Value::Null);
         let spec = crate::tools::validate_call(name, arguments)?;
-        if spec.locus != crate::tools::Locus::Client {
-            return Err(format!(
-                "tool {name:?} is not a client-locus tool; cannot return it to the browser"
-            ));
+        validated.push(ValidatedToolCall {
+            id,
+            name: name.to_string(),
+            arguments: arguments.clone(),
+            locus: spec.locus,
+        });
+    }
+
+    Ok(Err(validated))
+}
+
+/// Execute an enclave-locus tool and return its JSON result, or an error.
+async fn execute_enclave_tool(
+    state: &AppState,
+    tool: &ValidatedToolCall,
+) -> serde_json::Value {
+    let Some(embedding_upstream) = &state.embedding else {
+        return json!({"error": "embedding model not configured"});
+    };
+    let Some(chat_upstream) = &state.inference else {
+        return json!({"error": "chat model not configured"});
+    };
+
+    match tool.name.as_str() {
+        "embed" => {
+            let text = tool
+                .arguments
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            embed_text(embedding_upstream, text).await
+        }
+        "summarize" => {
+            let text = tool
+                .arguments
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            summarize_text(chat_upstream, text).await
+        }
+        "extract_metadata" => {
+            let text = tool
+                .arguments
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            extract_metadata_text(chat_upstream, text).await
+        }
+        _ => json!({"error": format!("unknown enclave tool: {}", tool.name)}),
+    }
+}
+
+/// Call the embedding model to embed text to a vector.
+async fn embed_text(upstream: &str, text: &str) -> serde_json::Value {
+    let request = json!({
+        "input": text,
+        "encoding_format": "float",
+    });
+    match crate::upstream::request(
+        upstream,
+        hyper::Method::POST,
+        "/v1/embeddings",
+        Some(request.to_string()),
+    )
+    .await
+    {
+        Ok((status, body)) => {
+            if !status.is_success() {
+                eprintln!("embed: embedding model returned {status}");
+                return json!({"error": "embedding failed"});
+            }
+            match serde_json::from_slice::<serde_json::Value>(&body) {
+                Ok(response) => {
+                    if let Some(embedding) = response
+                        .get("data")
+                        .and_then(|d| d.get(0))
+                        .and_then(|d| d.get("embedding"))
+                    {
+                        json!({"embedding": embedding})
+                    } else {
+                        json!({"error": "invalid embedding response"})
+                    }
+                }
+                Err(e) => {
+                    eprintln!("embed: failed to parse embedding response: {e}");
+                    json!({"error": "invalid embedding response"})
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("embed: embedding model unreachable: {e}");
+            json!({"error": "embedding model unreachable"})
         }
     }
-    Ok(())
+}
+
+/// Call the chat model to generate a summary.
+async fn summarize_text(upstream: &str, text: &str) -> serde_json::Value {
+    let prompt = format!(
+        "Provide a brief 1-2 sentence summary of the following text:\n\n{}",
+        text
+    );
+    let request = json!({
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant that creates concise summaries."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 100,
+        "temperature": 0.3,
+    });
+
+    match crate::upstream::chat_completion(upstream, request.to_string()).await {
+        Ok(summary) => json!({"summary": summary}),
+        Err(()) => json!({"error": "summarization failed"}),
+    }
+}
+
+/// Call the chat model to extract metadata (emotions, situations, life phases).
+async fn extract_metadata_text(upstream: &str, text: &str) -> serde_json::Value {
+    let prompt = format!(
+        "Analyze the following journal entry and extract structured metadata. \
+         Return a JSON object with arrays for 'emotions', 'situations', and 'lifePhases'.\n\n{}",
+        text
+    );
+    let request = json!({
+        "messages": [
+            {"role": "system", "content": "You are a metadata extraction assistant. \
+             Extract emotions (joy, anxiety, etc), situations (work, family, etc), \
+             and life phases (new job, parenthood, etc) as string arrays in JSON format. \
+             Return ONLY valid JSON with keys 'emotions', 'situations', 'lifePhases'."},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 200,
+        "temperature": 0.3,
+    });
+
+    match crate::upstream::chat_completion(upstream, request.to_string()).await {
+        Ok(response_text) => {
+            match serde_json::from_str::<serde_json::Value>(&response_text) {
+                Ok(metadata) => {
+                    // Validate and extract only recognized fields
+                    let mut result = json!({});
+                    if let Some(emotions) = metadata.get("emotions").and_then(|e| e.as_array()) {
+                        if emotions
+                            .iter()
+                            .all(|e| e.is_string())
+                        {
+                            result["emotions"] = json!(emotions);
+                        }
+                    }
+                    if let Some(situations) = metadata.get("situations").and_then(|s| s.as_array()) {
+                        if situations
+                            .iter()
+                            .all(|s| s.is_string())
+                        {
+                            result["situations"] = json!(situations);
+                        }
+                    }
+                    if let Some(phases) = metadata.get("lifePhases").and_then(|p| p.as_array()) {
+                        if phases
+                            .iter()
+                            .all(|p| p.is_string())
+                        {
+                            result["lifePhases"] = json!(phases);
+                        }
+                    }
+                    if result.is_object() && !result.as_object().unwrap().is_empty() {
+                        result
+                    } else {
+                        json!({"error": "no valid metadata extracted"})
+                    }
+                }
+                Err(_) => json!({"error": "failed to parse metadata response"}),
+            }
+        }
+        Err(()) => json!({"error": "metadata extraction failed"}),
+    }
 }
 
 fn error(status: StatusCode, message: &str) -> Response {
@@ -260,6 +519,7 @@ mod tests {
             keys: Arc::new(EnclaveKeys::generate()),
             dev: false,
             inference,
+            embedding: None,
             harness: Arc::new(load_fixture_harness()),
         }
     }
@@ -552,37 +812,52 @@ mod tests {
     // ── manifest enforcement on harness output ────────────────────────────────
 
     #[test]
-    fn validate_harness_output_accepts_a_plain_reply() {
-        assert!(validate_harness_output(br#"{"reply":"hello"}"#).is_ok());
+    fn validate_harness_reply_accepts_a_plain_reply() {
+        let result = validate_harness_reply(br#"{"reply":"hello"}"#).unwrap();
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn validate_harness_output_accepts_a_manifest_tool_call() {
+    fn validate_harness_reply_accepts_client_tool_calls() {
         let ok =
             br#"{"tool_calls":[{"id":"1","name":"search_entries","arguments":{"query":"x"}}]}"#;
-        assert!(validate_harness_output(ok).is_ok());
+        let result = validate_harness_reply(ok).unwrap();
+        assert!(result.is_err()); // tool_calls are returned as Err variant
+        let calls = result.unwrap_err();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "search_entries");
     }
 
     #[test]
-    fn validate_harness_output_rejects_an_unknown_tool() {
-        // A hostile/buggy harness cannot smuggle an undeclared capability onto
-        // the client: anything not in the manifest is refused.
+    fn validate_harness_reply_accepts_enclave_tool_calls() {
+        let ok =
+            br#"{"tool_calls":[{"id":"1","name":"embed","arguments":{"text":"hello"}}]}"#;
+        let result = validate_harness_reply(ok).unwrap();
+        assert!(result.is_err());
+        let calls = result.unwrap_err();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "embed");
+    }
+
+    #[test]
+    fn validate_harness_reply_rejects_an_unknown_tool() {
+        // A hostile/buggy harness cannot smuggle an undeclared capability.
         let bad = br#"{"tool_calls":[{"id":"1","name":"exfiltrate","arguments":{}}]}"#;
-        let err = validate_harness_output(bad).unwrap_err();
+        let err = validate_harness_reply(bad).unwrap_err();
         assert!(err.contains("not in manifest"), "unexpected error: {err}");
     }
 
     #[test]
-    fn validate_harness_output_rejects_a_malformed_call() {
+    fn validate_harness_reply_rejects_a_malformed_call() {
         // Missing the required `query` argument for search_entries.
         let bad = br#"{"tool_calls":[{"id":"1","name":"search_entries","arguments":{}}]}"#;
-        let err = validate_harness_output(bad).unwrap_err();
+        let err = validate_harness_reply(bad).unwrap_err();
         assert!(err.contains("query"), "unexpected error: {err}");
     }
 
     #[test]
-    fn validate_harness_output_rejects_a_shapeless_reply() {
-        let err = validate_harness_output(br#"{"nonsense":true}"#).unwrap_err();
+    fn validate_harness_reply_rejects_a_shapeless_reply() {
+        let err = validate_harness_reply(br#"{"nonsense":true}"#).unwrap_err();
         assert!(err.contains("neither"), "unexpected error: {err}");
     }
 

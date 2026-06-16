@@ -1,24 +1,21 @@
 /**
- * Client-side tool executor (issue #10).
+ * Client-side tool executor (issues #10 and #11).
  *
  * The enclave's harness can ask the browser to run a tool instead of replying.
  * Two tools live here, both bound to the user's *local* data (never the
  * enclave's):
  *
- *   - `search_entries`  — keyword/metadata search over IndexedDB. Returns only
- *                         the matched entries (top-k). This is the only path by
- *                         which entries leave the device for the enclave, so
+ *   - `search_entries`  — keyword/metadata/vector similarity search over IndexedDB.
+ *                         Returns only the matched entries (top-k). This is the only
+ *                         path by which entries leave the device for the enclave, so
  *                         the returned set IS the data-minimization boundary:
- *                         nothing else crosses.
+ *                         nothing else crosses. (Vector similarity added in issue #11.)
  *   - `attach_metadata` — merge harness-provided enrichment into one stored
  *                         entry and re-encrypt it locally.
  *
  * Tool names, argument shapes, and loci mirror the launcher manifest
  * (`launcher/src/tools.rs`); the launcher re-validates every call before it
  * reaches us.
- *
- * Vector similarity for `search_entries` arrives in issue #11; for now it is
- * keyword + metadata matching.
  */
 import type { JournalDb } from "../lib/store";
 import type { EntryEnrichment, JournalEntry } from "../lib/types";
@@ -115,13 +112,29 @@ async function searchEntries(
   const all = await db.listEntries(key); // already newest-first
   const keywords = tokenize(query).filter((t) => !STOPWORDS.has(t));
 
+  // Check if vector similarity search is available
+  const queryEmbedding = Array.isArray(args.embedding) ? (args.embedding as number[]) : null;
+
   let ranked: JournalEntry[];
-  if (keywords.length === 0) {
-    // No usable keywords (e.g. an all-stopword question): fall back to the most
-    // recent entries so the assistant still has grounding — still top-k, still
-    // only these cross the channel.
+  if (queryEmbedding !== null && queryEmbedding.length > 0) {
+    // Vector similarity search: rank by cosine similarity to the query embedding
+    ranked = all
+      .map((entry) => ({
+        entry,
+        score: entry.enrichment?.embedding
+          ? cosineSimilarity(queryEmbedding, entry.enrichment.embedding)
+          : 0,
+      }))
+      .filter((r) => r.score > 0)
+      .sort((a, b) => b.score - a.score || b.entry.createdAt.localeCompare(a.entry.createdAt))
+      .map((r) => r.entry);
+  } else if (keywords.length === 0) {
+    // No usable keywords and no embedding: fall back to the most recent entries
+    // so the assistant still has grounding — still top-k, still only these cross
+    // the channel.
     ranked = all;
   } else {
+    // Keyword search: rank by number of matching keywords
     ranked = all
       .map((entry) => ({ entry, score: score(entry, keywords) }))
       .filter((r) => r.score > 0)
@@ -148,6 +161,21 @@ function score(entry: JournalEntry, keywords: string[]): number {
   // Count distinct keywords present — presence, not frequency, so a long entry
   // doesn't dominate on one repeated word.
   return keywords.reduce((n, kw) => (hay.includes(kw) ? n + 1 : n), 0);
+}
+
+/// Compute cosine similarity between two vectors.
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  return denominator === 0 ? 0 : dotProduct / denominator;
 }
 
 function summarizeSearch(query: string, matches: MatchedEntry[]): string {

@@ -1,30 +1,31 @@
 //! llama-server subprocess supervision.
 //!
-//! The launcher owns the inference engine as a child process: llama.cpp's
-//! `llama-server`, loaded with the chat model, bound to `127.0.0.1` so it is
-//! reachable only from inside the container. If the process dies it is
+//! The launcher owns inference engines as child processes: llama.cpp's
+//! `llama-server`, each loaded with a model and bound to `127.0.0.1` so it is
+//! reachable only from inside the container. If a process dies it is
 //! restarted with exponential backoff. The launcher never parses model
-//! output itself — `/chat` (see `chat.rs`) proxies one OpenAI-style
-//! completion request per user message.
+//! output itself — `/chat` (see `chat.rs`) proxies OpenAI-style
+//! completion requests per user message, and enclave tools call the models directly.
 //!
 //! Configuration is environment variables, resolved once at boot:
 //!
-//! - `LLAMA_MODEL_PATH` — GGUF model file; presence enables supervision.
-//! - `LLAMA_SERVER_BIN` — binary path (default `/app/llama-server`, where
-//!   the official llama.cpp server image installs it).
-//! - `LLAMA_PORT` — loopback port (default 8081).
-//! - `LLAMA_EXTRA_ARGS` — whitespace-split extra args (context size, threads).
-//! - `LLAMA_UPSTREAM` — dev mode only (`--dev` / `LAUNCHER_DEV=1`): skip
-//!   supervision entirely and use an already-running llama-server at this
-//!   `host:port`.
+//! - `LLAMA_MODEL_PATH` — chat GGUF model file; presence enables supervision.
+//! - `LLAMA_EMBEDDING_MODEL_PATH` — embedding GGUF model (optional); enables
+//!   a second instance for fast embedding inference (issue #11).
+//! - `LLAMA_SERVER_BIN` — binary path (default `/app/llama-server`).
+//! - `LLAMA_PORT` — chat model loopback port (default 8081).
+//! - `LLAMA_EMBEDDING_PORT` — embedding model loopback port (default 8082).
+//! - `LLAMA_EXTRA_ARGS` — whitespace-split extra args for chat model.
+//! - `LLAMA_EMBEDDING_EXTRA_ARGS` — extra args for embedding model.
+//! - `LLAMA_UPSTREAM` — dev mode only: skip supervision, use external server.
+//! - `LLAMA_EMBEDDING_UPSTREAM` — dev mode only: skip supervision, use external embedding server.
 //!
 //! None of the `LLAMA_*` variables may ever be listed in the image's
 //! `tee.launch_policy.allow_env_override` label: an operator who could set
-//! them — `LLAMA_UPSTREAM` especially — could point decrypted user messages
-//! at an arbitrary address. Confidential Space rejects operator-supplied env
-//! vars unless that label allows them, so production is safe by default;
-//! the dev-mode gate below makes the bypass impossible even if the label
-//! were ever added.
+//! them could point decrypted user messages at an arbitrary address.
+//! Confidential Space rejects operator-supplied env vars unless that label
+//! allows them, so production is safe by default; the dev-mode gate below
+//! makes the bypass impossible even if the label were ever added.
 
 use std::time::Duration;
 
@@ -33,7 +34,8 @@ use tokio::time::Instant;
 
 /// Defaults match the official `ghcr.io/ggml-org/llama.cpp:server` image.
 const DEFAULT_BIN: &str = "/app/llama-server";
-const DEFAULT_PORT: u16 = 8081;
+const DEFAULT_CHAT_PORT: u16 = 8081;
+const DEFAULT_EMBEDDING_PORT: u16 = 8082;
 
 /// Backoff for restarting a dying llama-server: start here, double while the
 /// process keeps dying quickly, cap, and reset once a run survives
@@ -50,34 +52,64 @@ pub struct LlamaConfig {
     pub extra_args: Vec<String>,
     /// Initial restart backoff; only tests shrink this.
     pub initial_backoff: Duration,
+    /// Model type for logging; "chat" or "embedding".
+    model_type: &'static str,
 }
 
-/// The loopback port llama-server will be told to bind, resolved from the
-/// environment the same way `LlamaConfig::from_env` does.
-fn port_from_env() -> u16 {
+/// The loopback port the chat llama-server will bind to.
+fn chat_port_from_env() -> u16 {
     std::env::var("LLAMA_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(DEFAULT_PORT)
+        .unwrap_or(DEFAULT_CHAT_PORT)
 }
 
-/// The `host:port` a supervised llama-server will serve on, before any model
+/// The loopback port the embedding llama-server will bind to.
+fn embedding_port_from_env() -> u16 {
+    std::env::var("LLAMA_EMBEDDING_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(DEFAULT_EMBEDDING_PORT)
+}
+
+/// The `host:port` a supervised chat llama-server will serve on, before any model
 /// exists. Lets artifact delivery (artifacts.rs) hand `/chat` its upstream
 /// at boot while the model is still being fetched and decrypted.
-pub fn planned_upstream() -> String {
-    format!("127.0.0.1:{}", port_from_env())
+pub fn planned_chat_upstream() -> String {
+    format!("127.0.0.1:{}", chat_port_from_env())
+}
+
+#[allow(dead_code)]
+/// The `host:port` a supervised embedding llama-server will serve on.
+/// Placeholder for future artifact-delivery support (issue #11).
+pub fn planned_embedding_upstream() -> String {
+    format!("127.0.0.1:{}", embedding_port_from_env())
 }
 
 impl LlamaConfig {
-    fn from_env(model: String) -> Self {
+    fn chat_from_env(model: String) -> Self {
         Self {
             bin: std::env::var("LLAMA_SERVER_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()),
             model,
-            port: port_from_env(),
+            port: chat_port_from_env(),
             extra_args: std::env::var("LLAMA_EXTRA_ARGS")
                 .map(|a| a.split_whitespace().map(str::to_string).collect())
                 .unwrap_or_default(),
             initial_backoff: INITIAL_BACKOFF,
+            model_type: "chat",
+        }
+    }
+
+    fn embedding_from_env(model: String) -> Self {
+        Self {
+            bin: std::env::var("LLAMA_SERVER_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()),
+            model,
+            port: embedding_port_from_env(),
+            extra_args: std::env::var("LLAMA_EMBEDDING_EXTRA_ARGS")
+                .map(|a| a.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default(),
+            initial_backoff: INITIAL_BACKOFF,
+            model_type: "embedding",
         }
     }
 
@@ -100,37 +132,72 @@ impl LlamaConfig {
     fn upstream(&self) -> String {
         format!("127.0.0.1:{}", self.port)
     }
+
+    fn log_prefix(&self) -> String {
+        format!("inference/{}", self.model_type)
+    }
 }
 
-/// Resolve inference configuration from the environment. Returns the
-/// `host:port` of the llama-server the `/chat` endpoint should call, or
-/// `None` when inference is not configured (the endpoint then serves 503).
-pub fn init_from_env(dev: bool) -> Option<String> {
+/// Resolved inference configuration: chat model and optional embedding model.
+pub struct InferenceConfig {
+    pub chat: String,
+    pub embedding: Option<String>,
+}
+
+/// Resolve inference configuration from the environment. Returns both the chat
+/// and embedding model upstreams, or `None` for chat when not configured.
+pub fn init_from_env(dev: bool) -> Option<InferenceConfig> {
     // Empty counts as unset: the Dockerfile sets LLAMA_MODEL_PATH="" when no
     // weights are baked into the image.
     let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-    if let Some(model) = env("LLAMA_MODEL_PATH") {
-        Some(start(model))
+
+    let chat = if let Some(model) = env("LLAMA_MODEL_PATH") {
+        Some(start_chat(model))
     } else if let Some(upstream) = env("LLAMA_UPSTREAM") {
         // An external upstream receives decrypted user messages, so the
         // audited TCB must never honor it in production (see module docs).
         if !dev {
-            eprintln!("inference: LLAMA_UPSTREAM ignored outside dev mode; /chat will serve 503");
+            eprintln!("inference/chat: LLAMA_UPSTREAM ignored outside dev mode; /chat will serve 503");
             return None;
         }
-        println!("inference: using external llama-server at {upstream} (unsupervised, dev only)");
+        println!("inference/chat: using external llama-server at {upstream} (unsupervised, dev only)");
         Some(upstream)
     } else {
-        println!("inference: not configured (set LLAMA_MODEL_PATH or LLAMA_UPSTREAM); /chat will serve 503");
+        println!("inference/chat: not configured (set LLAMA_MODEL_PATH or LLAMA_UPSTREAM); /chat will serve 503");
         None
-    }
+    }?;
+
+    let embedding = if let Some(model) = env("LLAMA_EMBEDDING_MODEL_PATH") {
+        Some(start_embedding(model))
+    } else if let Some(upstream) = env("LLAMA_EMBEDDING_UPSTREAM") {
+        if !dev {
+            eprintln!("inference/embedding: LLAMA_EMBEDDING_UPSTREAM ignored outside dev mode");
+            None
+        } else {
+            println!("inference/embedding: using external llama-server at {upstream} (unsupervised, dev only)");
+            Some(upstream)
+        }
+    } else {
+        None
+    };
+
+    Some(InferenceConfig { chat, embedding })
 }
 
-/// Supervise a llama-server on the given model file and return the
+/// Supervise a chat llama-server on the given model file and return the
 /// `host:port` it will serve on. Called at boot when weights are baked into
 /// the image, or after artifact delivery has decrypted them onto tmpfs.
-pub fn start(model: String) -> String {
-    let config = LlamaConfig::from_env(model);
+pub fn start_chat(model: String) -> String {
+    let config = LlamaConfig::chat_from_env(model);
+    let upstream = config.upstream();
+    supervise(config);
+    upstream
+}
+
+/// Supervise an embedding llama-server on the given model file and return the
+/// `host:port` it will serve on.
+pub fn start_embedding(model: String) -> String {
+    let config = LlamaConfig::embedding_from_env(model);
     let upstream = config.upstream();
     supervise(config);
     upstream
@@ -141,13 +208,15 @@ pub fn start(model: String) -> String {
 fn supervise(config: LlamaConfig) {
     let boot = Instant::now();
     let upstream = config.upstream();
+    let log_prefix = config.log_prefix();
     tokio::spawn(async move {
         match wait_until_healthy(&upstream, Duration::from_secs(600)).await {
             Ok(()) => println!(
-                "inference: llama-server ready in {:.1}s (boot to /health ok)",
+                "{}: ready in {:.1}s (boot to /health ok)",
+                log_prefix,
                 boot.elapsed().as_secs_f64()
             ),
-            Err(e) => eprintln!("inference: llama-server never became healthy: {e}"),
+            Err(e) => eprintln!("{}: never became healthy: {e}", log_prefix),
         }
     });
     tokio::spawn(supervision_loop(config));
@@ -155,9 +224,11 @@ fn supervise(config: LlamaConfig) {
 
 async fn supervision_loop(config: LlamaConfig) {
     let mut backoff = config.initial_backoff;
+    let log_prefix = config.log_prefix();
     loop {
         println!(
-            "inference: starting {} {}",
+            "{}: starting {} {}",
+            log_prefix,
             config.bin,
             config.args().join(" ")
         );
@@ -166,7 +237,8 @@ async fn supervision_loop(config: LlamaConfig) {
             Ok(mut child) => {
                 let status = child.wait().await;
                 eprintln!(
-                    "inference: llama-server exited ({}) after {:.1}s",
+                    "{}: exited ({}) after {:.1}s",
+                    log_prefix,
                     status.map_or_else(|e| e.to_string(), |s| s.to_string()),
                     started.elapsed().as_secs_f64()
                 );
@@ -174,7 +246,7 @@ async fn supervision_loop(config: LlamaConfig) {
                     backoff = config.initial_backoff;
                 }
             }
-            Err(e) => eprintln!("inference: failed to spawn {}: {e}", config.bin),
+            Err(e) => eprintln!("{}: failed to spawn {}: {e}", log_prefix, config.bin),
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -225,6 +297,7 @@ mod tests {
             port: 0,
             extra_args: vec![],
             initial_backoff: Duration::from_millis(20),
+            model_type: "chat",
         };
         let supervisor = tokio::spawn(supervision_loop(config));
 
@@ -251,6 +324,7 @@ mod tests {
             port: 8081,
             extra_args: vec!["--ctx-size".to_string(), "4096".to_string()],
             initial_backoff: INITIAL_BACKOFF,
+            model_type: "chat",
         };
         let args = config.args();
         let host_at = args.iter().position(|a| a == "--host").unwrap();
