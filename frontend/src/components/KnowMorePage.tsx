@@ -142,6 +142,14 @@ export function KnowMorePage({ onBack }: Props) {
             </a>
             .
           </p>
+          <p>
+            One honest caveat: this page is served to you by the operator, so the verification
+            code running in your browser right now could itself be lying about what it checks.
+            Trusting it is a trust-on-first-use bet. If you are paranoid (good!), don't rely on
+            our hosted copy — clone the open-source repository and run the frontend yourself with{" "}
+            <code>pnpm dev</code> against the same enclave. The code is identical and the
+            verification is then yours, not ours.
+          </p>
         </section>
       </article>
     </main>
