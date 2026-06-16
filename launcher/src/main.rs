@@ -10,6 +10,8 @@ mod harness;
 mod hpke_channel;
 mod keys;
 mod llama;
+#[cfg(test)]
+mod test_support;
 mod tls;
 mod upstream;
 

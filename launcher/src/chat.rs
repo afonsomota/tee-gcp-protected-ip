@@ -153,6 +153,9 @@ fn error(status: StatusCode, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Shared with harness.rs's tests; chat asserts only on the non-system
+    // turns it sent, so it forwards `false` to the mock.
+    use crate::test_support::{fixture_file, mock_llama};
     use crate::keys::EnclaveKeys;
     use axum::body::Body;
     use axum::http::Request;
@@ -177,49 +180,12 @@ mod tests {
     /// Load the committed, signed harness fixture into a ready slot so `/chat`
     /// routes through the real wasm module (built by scripts/build-harness.sh).
     fn load_fixture_harness() -> crate::harness::HarnessSlot {
-        let dir =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness");
-        let read = |name: &str| {
-            std::fs::read(dir.join(name)).unwrap_or_else(|e| {
-                panic!("missing {name} (run scripts/build-harness.sh): {e}")
-            })
-        };
-        let harness = crate::harness::Harness::new(&read("harness.wasm"), &read("harness.wasm.sig"))
-            .expect("fixture harness should verify");
+        let harness = crate::harness::Harness::new(
+            &fixture_file("harness.wasm"),
+            &fixture_file("harness.wasm.sig"),
+        )
+        .expect("fixture harness should verify");
         crate::harness::HarnessSlot::loaded(Arc::new(harness))
-    }
-
-    /// Serve an OpenAI-shaped completion (echoing every non-system message it
-    /// received back inside the reply) on an ephemeral loopback port.
-    async fn mock_llama_server() -> String {
-        async fn completions(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
-            let seen: Vec<String> = body["messages"]
-                .as_array()
-                .map(|messages| {
-                    messages
-                        .iter()
-                        .filter(|m| m["role"] != "system")
-                        .map(|m| {
-                            format!(
-                                "{}: {}",
-                                m["role"].as_str().unwrap_or_default(),
-                                m["content"].as_str().unwrap_or_default()
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Json(json!({
-                "choices": [
-                    { "message": { "role": "assistant", "content": format!("model saw [{}]", seen.join(" | ")) } }
-                ]
-            }))
-        }
-        let app = Router::new().route("/v1/chat/completions", post(completions));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("127.0.0.1:{}", addr.port())
     }
 
     async fn post_chat(
@@ -283,7 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_roundtrips_an_encrypted_model_reply() {
-        let upstream = mock_llama_server().await;
+        let upstream = mock_llama(false).await;
         let state = test_state(Some(upstream));
         let (envelope, reply_sk) = sealed_request(&state, "how was my week?");
 
@@ -296,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_forwards_the_full_history_in_order() {
-        let upstream = mock_llama_server().await;
+        let upstream = mock_llama(false).await;
         let state = test_state(Some(upstream));
         let (envelope, reply_sk) = sealed_history(
             &state,
@@ -319,7 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_rejects_an_empty_history() {
-        let upstream = mock_llama_server().await;
+        let upstream = mock_llama(false).await;
         let state = test_state(Some(upstream));
         let (envelope, _) = sealed_history(&state, json!([]));
         let (status, body) = post_chat(state, envelope).await;
@@ -335,7 +301,7 @@ mod tests {
         // The system prompt belongs to the launcher; a client-supplied
         // "system" role is rejected, and the unencrypted error names the
         // index but never the decrypted content.
-        let upstream = mock_llama_server().await;
+        let upstream = mock_llama(false).await;
         let state = test_state(Some(upstream));
         let (envelope, _) = sealed_history(
             &state,
@@ -409,7 +375,7 @@ mod tests {
     #[tokio::test]
     async fn chat_rejects_envelope_sealed_with_echo_info_string() {
         // Domain separation: an /hpke/echo request must not decrypt as /chat.
-        let upstream = mock_llama_server().await;
+        let upstream = mock_llama(false).await;
         let state = test_state(Some(upstream));
         let mut csprng = <rand::rngs::StdRng as rand::SeedableRng>::from_os_rng();
         let (_, reply_pk) = Kem::gen_keypair(&mut csprng);

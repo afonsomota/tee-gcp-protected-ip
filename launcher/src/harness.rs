@@ -155,6 +155,12 @@ impl Harness {
         if out_len == 0 {
             return Err("harness produced no reply (inference failed)".to_string());
         }
+        // `out_ptr`/`out_len` are guest-controlled; bounds-check against actual
+        // linear memory before allocating, so a hostile reply length can't make
+        // the host allocate up to ~4 GiB ahead of the `memory.read` validation.
+        if out_ptr as usize + out_len as usize > memory.data_size(&store) {
+            return Err("harness reply out of bounds".to_string());
+        }
         let mut out = vec![0u8; out_len as usize];
         memory
             .read(&store, out_ptr as usize, &mut out)
@@ -326,62 +332,18 @@ async fn load_source(dev: bool) -> Result<Option<(Vec<u8>, Vec<u8>)>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The committed fixture (built + signed by scripts/build-harness.sh; CI
-    /// rebuilds it fresh against current source).
-    fn fixture_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/harness")
-    }
+    // Shared with chat.rs's tests: the harness fixture loader and the
+    // ephemeral llama stand-in. The harness wants the system role echoed
+    // (mock_llama(true)) so it can prove its own prompt orchestration drove
+    // the reply; chat.rs passes false.
+    use crate::test_support::{fixture_file, mock_llama};
 
     fn fixture_wasm() -> Vec<u8> {
-        let path = fixture_dir().join("harness.wasm");
-        std::fs::read(&path).unwrap_or_else(|e| {
-            panic!("missing {path:?} (run scripts/build-harness.sh): {e}")
-        })
+        fixture_file("harness.wasm")
     }
 
     fn fixture_sig() -> Vec<u8> {
-        let path = fixture_dir().join("harness.wasm.sig");
-        std::fs::read(&path).unwrap_or_else(|e| {
-            panic!("missing {path:?} (run scripts/build-harness.sh): {e}")
-        })
-    }
-
-    /// A llama-server stand-in that echoes every message it received —
-    /// *including* the system role — so tests can prove the harness's own
-    /// prompt orchestration drove the reply.
-    async fn mock_llama_echoing_system() -> String {
-        use axum::routing::post;
-        use axum::{Json, Router};
-        async fn completions(
-            Json(body): Json<serde_json::Value>,
-        ) -> Json<serde_json::Value> {
-            let seen: Vec<String> = body["messages"]
-                .as_array()
-                .map(|messages| {
-                    messages
-                        .iter()
-                        .map(|m| {
-                            format!(
-                                "{}: {}",
-                                m["role"].as_str().unwrap_or_default(),
-                                m["content"].as_str().unwrap_or_default()
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            Json(serde_json::json!({
-                "choices": [
-                    { "message": { "role": "assistant", "content": format!("saw [{}]", seen.join(" | ")) } }
-                ]
-            }))
-        }
-        let app = Router::new().route("/v1/chat/completions", post(completions));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("127.0.0.1:{}", addr.port())
+        fixture_file("harness.wasm.sig")
     }
 
     #[test]
@@ -455,7 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn reply_comes_from_the_harness_prompt_orchestration() {
-        let upstream = mock_llama_echoing_system().await;
+        let upstream = mock_llama(true).await;
         let harness = Harness::new(&fixture_wasm(), &fixture_sig()).unwrap();
         let context = serde_json::json!({
             "messages": [{ "role": "user", "content": "how was my week?" }]

@@ -41,15 +41,23 @@ import json
 import secrets
 from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-# Reuse the weights provisioner's envelope + GCP helpers (its filename has a
-# hyphen, so load it by path). Importing runs only its top-level defs — the
-# CLI is guarded by __main__ — so this has no side effects.
-_pw_path = Path(__file__).resolve().parent / "provision-weights.py"
-_spec = importlib.util.spec_from_file_location("provision_weights", _pw_path)
-pw = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(pw)
+def _load_sibling(module_name: str, filename: str):
+    """Import a hyphenated sibling script by path. Importing runs only its
+    top-level defs — each sibling guards its CLI behind __main__ — so this has
+    no side effects."""
+    path = Path(__file__).resolve().parent / filename
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Reuse the weights provisioner's envelope + GCP helpers and the harness
+# signer's key loader, so neither the envelope format nor the signing logic can
+# drift from its single source of truth.
+pw = _load_sibling("provision_weights", "provision-weights.py")
+sh = _load_sibling("sign_harness", "sign-harness.py")
 
 DEFAULT_WASM = (
     Path(__file__).resolve().parent.parent
@@ -61,11 +69,9 @@ DEFAULT_SEED = (
 
 
 def sign(wasm: bytes, seed_path: Path) -> bytes:
-    """Detached Ed25519 signature over the exact harness bytes (64 bytes)."""
-    seed = seed_path.read_bytes()
-    if len(seed) != 32:
-        raise SystemExit(f"{seed_path}: expected a 32-byte seed, got {len(seed)}")
-    return Ed25519PrivateKey.from_private_bytes(seed).sign(wasm)
+    """Detached Ed25519 signature over the exact harness bytes (64 bytes).
+    Shares sign-harness.py's key loader so the two scripts can't diverge."""
+    return sh.load_key(seed_path).sign(wasm)
 
 
 def main() -> None:

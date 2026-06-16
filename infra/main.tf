@@ -164,11 +164,19 @@ resource "google_storage_bucket_iam_member" "artifacts_reader" {
 # rotation/revocation story from issue #7. Note for dev deployments: two
 # workspaces deploying the same digest create the same binding twice; the
 # first `terraform destroy` removes it for both. Acceptable for dev churn.
-resource "google_kms_crypto_key_iam_member" "weights_decrypter" {
+resource "google_kms_crypto_key_iam_member" "artifact_decrypter" {
   count         = local.artifact_delivery_enabled && var.image_digest != null ? 1 : 0
   crypto_key_id = local.artifact_kms_key
   role          = "roles/cloudkms.cryptoKeyDecrypter"
   member        = "principalSet://iam.googleapis.com/${local.wip_pool}/attribute.image_digest/${var.image_digest}"
+}
+
+# Renamed from weights_decrypter: the grant now gates on either artifact
+# (weights or harness, see local.artifact_delivery_enabled). The moved block
+# migrates existing state with zero diff — prod stays untouched on apply.
+moved {
+  from = google_kms_crypto_key_iam_member.weights_decrypter
+  to   = google_kms_crypto_key_iam_member.artifact_decrypter
 }
 
 # IAM grants on a freshly created service account are eventually consistent
@@ -183,7 +191,7 @@ resource "time_sleep" "iam_propagation" {
     google_project_iam_member.log_writer,
     google_project_iam_member.ar_reader,
     google_storage_bucket_iam_member.artifacts_reader,
-    google_kms_crypto_key_iam_member.weights_decrypter,
+    google_kms_crypto_key_iam_member.artifact_decrypter,
   ]
 
   # Re-run the wait when the per-digest decrypt grant changes: a digest
@@ -191,7 +199,7 @@ resource "time_sleep" "iam_propagation" {
   # already exist, and KMS IAM propagation takes minutes too. (The launcher
   # also retries delivery for ~5 minutes, covering the slow tail.)
   triggers = {
-    weights_decrypter_digest = local.artifact_delivery_enabled && var.image_digest != null ? var.image_digest : ""
+    artifact_decrypter_digest = local.artifact_delivery_enabled && var.image_digest != null ? var.image_digest : ""
   }
 
   create_duration = "120s"

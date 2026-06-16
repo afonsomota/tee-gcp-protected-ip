@@ -264,6 +264,39 @@ impl Manifest {
         }
         Ok(manifest)
     }
+
+    /// Decode the detached company signature; error if a manifest that must be
+    /// signed (the harness) lacks it. Keeping the "required + base64-decode"
+    /// invariant on the type means a new signed-artifact path can't forget it.
+    fn required_signature(&self) -> Result<Vec<u8>, String> {
+        let b64 = self
+            .signature
+            .as_deref()
+            .ok_or("harness manifest is missing the required `signature` field")?;
+        B64.decode(b64)
+            .map_err(|e| format!("harness manifest signature is not base64: {e}"))
+    }
+}
+
+/// Fail if the streamed plaintext doesn't match the manifest's size + SHA-256.
+/// Both artifacts run the identical check after decryption; `label`
+/// ("weights"/"harness") only flavors the error.
+fn verify_against_manifest(
+    manifest: &Manifest,
+    size: u64,
+    sha256: [u8; 32],
+    label: &str,
+) -> Result<(), String> {
+    if size != manifest.plaintext_size || hex::encode(sha256) != manifest.plaintext_sha256 {
+        return Err(format!(
+            "decrypted {label} does not match the manifest: got {size} bytes / sha256 {}, \
+             expected {} bytes / sha256 {}",
+            hex::encode(sha256),
+            manifest.plaintext_size,
+            manifest.plaintext_sha256
+        ));
+    }
+    Ok(())
 }
 
 /// Fetch + parse the manifest and unwrap its DEK as the attested principal —
@@ -318,27 +351,12 @@ async fn fetch_harness(config: &Config) -> Result<(Vec<u8>, Vec<u8>), String> {
     let (gcs_token, manifest, dek, nonce_prefix) = fetch_manifest_and_key(config).await?;
 
     // The harness manifest must carry the signature; weights manifests do not.
-    let signature = B64
-        .decode(
-            manifest
-                .signature
-                .as_deref()
-                .ok_or("harness manifest is missing the required `signature` field")?,
-        )
-        .map_err(|e| format!("harness manifest signature is not base64: {e}"))?;
+    let signature = manifest.required_signature()?;
 
     let mut wasm = Vec::new();
     let (size, sha256) =
         stream_into(&gcs_token, config, &manifest, &dek, &nonce_prefix, &mut wasm).await?;
-    if size != manifest.plaintext_size || hex::encode(sha256) != manifest.plaintext_sha256 {
-        return Err(format!(
-            "decrypted harness does not match the manifest: got {size} bytes / sha256 {}, \
-             expected {} bytes / sha256 {}",
-            hex::encode(sha256),
-            manifest.plaintext_size,
-            manifest.plaintext_sha256
-        ));
-    }
+    verify_against_manifest(&manifest, size, sha256, "harness")?;
     println!("harness: decrypted {size} bytes (sha256 verified; signature checked on load)");
     Ok((wasm, signature))
 }
@@ -360,15 +378,9 @@ async fn deliver(config: &Config) -> Result<String, String> {
         }
     };
 
-    if size != manifest.plaintext_size || hex::encode(sha256) != manifest.plaintext_sha256 {
+    if let Err(e) = verify_against_manifest(&manifest, size, sha256, "weights") {
         std::fs::remove_file(&dest).ok();
-        return Err(format!(
-            "decrypted weights do not match the manifest: got {size} bytes / sha256 {}, \
-             expected {} bytes / sha256 {}",
-            hex::encode(sha256),
-            manifest.plaintext_size,
-            manifest.plaintext_sha256
-        ));
+        return Err(e);
     }
     println!("weights: decrypted {size} bytes to {dest} (sha256 verified)");
     Ok(dest)
@@ -497,7 +509,7 @@ impl<W: Write> EnvelopeDecryptor<W> {
         hasher.update(&plaintext);
         sink.write_all(&plaintext)
             .and_then(|()| sink.flush())
-            .map_err(|e| format!("failed to write weights file: {e}"))?;
+            .map_err(|e| format!("failed to write decrypted artifact: {e}"))?;
         Ok((
             plaintext_size + plaintext.len() as u64,
             hasher.finalize().into(),
@@ -509,7 +521,7 @@ impl<W: Write> EnvelopeDecryptor<W> {
         self.plaintext_size += plaintext.len() as u64;
         self.sink
             .write_all(plaintext)
-            .map_err(|e| format!("failed to write weights file: {e}"))
+            .map_err(|e| format!("failed to write decrypted artifact: {e}"))
     }
 }
 
