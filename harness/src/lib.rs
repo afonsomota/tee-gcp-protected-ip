@@ -29,10 +29,16 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The system prompt — the orchestration the company keeps closed. In a real
-/// deployment this is where tool-selection policy and prompt engineering (the
-/// genuine secret sauce) would live; here it stands in as a fixed prompt.
-const SYSTEM_PROMPT: &str = "You are a private journaling assistant. Be helpful and concise.";
+/// Prompt text lives outside the code, in `harness/prompts/`, so the
+/// orchestration — the company's closed IP — can be edited without touching
+/// Rust. Each file is embedded into the (signed, encrypted) wasm at build time:
+/// the sandbox has no filesystem, so there is no runtime load, and the prompt
+/// never leaves the sandbox in the clear. Add a file + a `const` here per role
+/// as the harness grows (sub-agents, composed prompts).
+mod prompts {
+    /// The top-level system prompt prepended to every conversation.
+    pub const SYSTEM: &str = include_str!("../prompts/system.md");
+}
 
 /// How many tokens the model may generate per turn.
 const MAX_TOKENS: u32 = 512;
@@ -107,7 +113,8 @@ fn orchestrate(ctx: &[u8]) -> Option<Vec<u8>> {
     let mut messages = Vec::with_capacity(context.messages.len() + 1);
     messages.push(Message {
         role: "system".to_string(),
-        content: SYSTEM_PROMPT.to_string(),
+        // `trim` drops the trailing newline editors leave in the .md file.
+        content: prompts::SYSTEM.trim().to_string(),
     });
     messages.extend(context.messages);
 

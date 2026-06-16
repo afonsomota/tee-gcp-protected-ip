@@ -27,6 +27,13 @@ the (closed) system prompt, calls the host model, and returns `{"reply":"..."}`.
 The ABI it shares with the launcher is documented at the top of that file and
 mirrored in `launcher/src/harness.rs`.
 
+The prompt text lives outside the code in `prompts/` (`prompts/system.md`
+today), embedded into the wasm at build time via `include_str!` — the sandbox
+has no filesystem, so there is no runtime load and the prompt stays inside the
+signed, encrypted artifact. Edit a `.md` file and rebuild to change it; add a
+file + a `const` in the `prompts` module of `src/lib.rs` to grow toward
+sub-agents or composed prompts.
+
 ## Build, sign, deliver
 
 The launcher loads the *compiled, signed* `harness.wasm` at runtime — this
