@@ -98,6 +98,14 @@ pub const ENRICH_RESPONSE_INFO: &[u8] = b"tee-example/hpke/enrich/response/v1";
 /// harness must not spin forever.
 const MAX_ENCLAVE_ROUNDS: usize = 6;
 
+/// Cap on the per-field entry text fed to the enclave models on `/enrich`. The
+/// token budgets in `enclave_tools.rs` bound model *output*; this bounds *input*
+/// so an over-large entry can't turn one save into unbounded in-enclave
+/// inference. The text never leaves the enclave, so this is a work cap, not a
+/// privacy one; the limits are generous for a journal entry.
+const MAX_ENRICH_TITLE_CHARS: usize = 1_024;
+const MAX_ENRICH_BODY_CHARS: usize = 16_384;
+
 #[derive(Deserialize)]
 struct ChatRequest {
     /// Full conversation so far, oldest first.
@@ -222,8 +230,10 @@ pub async fn chat(State(state): State<AppState>, Json(envelope): Json<Envelope>)
 
     // Run the harness, executing any enclave tools it asks for, until it
     // replies or asks the client to run a tool. The manifest tells the harness
-    // which enclave tools this deployment offers (e.g. `embed`).
-    let result = drive_loop(&upstreams, &harness, tool_results, |results| {
+    // which enclave tools this deployment offers (e.g. `embed`). On the chat
+    // path a transient `embed` failure degrades to keyword search rather than
+    // failing the whole turn (`degrade_embed`).
+    let result = drive_loop(&upstreams, &harness, tool_results, true, |results| {
         json!({
             "task": "chat",
             "messages": &messages,
@@ -259,12 +269,18 @@ pub async fn enrich(State(state): State<AppState>, Json(envelope): Json<Envelope
     };
     let manifest = crate::tools::manifest_json(upstreams.embeddings.is_some());
     let EnrichRequest {
-        entry,
+        mut entry,
         tool_results,
         ..
     } = request;
+    // Bound the work one save can trigger: cap the text handed to the enclave
+    // models. Stays in-enclave, so this is a work cap, not a privacy boundary.
+    truncate_chars(&mut entry.title, MAX_ENRICH_TITLE_CHARS);
+    truncate_chars(&mut entry.body, MAX_ENRICH_BODY_CHARS);
 
-    let result = drive_loop(&upstreams, &harness, tool_results, |results| {
+    // Enrich is best-effort and the client swallows a failure, so an enclave
+    // tool error fails the turn (no `degrade_embed`) rather than half-enriching.
+    let result = drive_loop(&upstreams, &harness, tool_results, false, |results| {
         json!({
             "task": "enrich",
             "entry": &entry,
@@ -298,13 +314,20 @@ fn ready(
 /// `{"tool_calls":...}`) to seal, or `Err(())` on any failure (logged with no
 /// plaintext). `build_context` produces the harness context for the current
 /// accumulated tool results.
+///
+/// When `degrade_embed` is set (the chat path), a failing `embed` does not abort
+/// the turn: the harness is fed an embed result with no embedding and falls
+/// through to keyword `search_entries`, so a momentarily-down embeddings server
+/// degrades to keyword search instead of 502-ing the whole chat. Other tools,
+/// and the enrich path, still abort on failure.
 async fn drive_loop(
     upstreams: &Upstreams,
     harness: &crate::harness::Harness,
     mut results: Vec<ToolResult>,
+    degrade_embed: bool,
     build_context: impl Fn(&[ToolResult]) -> String,
 ) -> Result<Vec<u8>, ()> {
-    for _round in 0..=MAX_ENCLAVE_ROUNDS {
+    for _round in 0..MAX_ENCLAVE_ROUNDS {
         let context = build_context(&results);
         let output = match harness.run(&upstreams.chat, context.as_bytes()).await {
             Ok(bytes) => bytes,
@@ -329,6 +352,18 @@ async fn drive_loop(
                             name: call.name,
                             result,
                         }),
+                        // Chat-path embed: degrade to keyword search. Feed the
+                        // harness an embed result with no `embedding` field; its
+                        // chat branch falls through to a keyword search_entries.
+                        // The detail is plaintext-free (tool + shape only).
+                        Err(detail) if degrade_embed && call.name == "embed" => {
+                            eprintln!("chat: embed failed, degrading to keyword search: {detail}");
+                            results.push(ToolResult {
+                                id: call.id,
+                                name: call.name,
+                                result: json!({ "error": "embedding unavailable" }),
+                            });
+                        }
                         Err(detail) => {
                             eprintln!("chat: enclave tool failed: {detail}");
                             return Err(());
@@ -345,6 +380,14 @@ async fn drive_loop(
     }
     eprintln!("chat: enclave tool loop exceeded {MAX_ENCLAVE_ROUNDS} rounds");
     Err(())
+}
+
+/// Truncate `s` in place to at most `max` characters (UTF-8-safe). No-op when
+/// already within bound.
+fn truncate_chars(s: &mut String, max: usize) {
+    if let Some((idx, _)) = s.char_indices().nth(max) {
+        s.truncate(idx);
+    }
 }
 
 /// Seal the harness reply bytes to `reply_pub`, or turn a loop failure into a
@@ -922,6 +965,50 @@ mod tests {
             calls[0]["arguments"]["query_embedding"],
             json!([16.0, 17.0, 18.0])
         );
+    }
+
+    #[tokio::test]
+    async fn chat_degrades_to_keyword_search_when_embed_fails() {
+        // Embeddings configured but momentarily down (server mid-restart): the
+        // chat turn must not 502. The in-enclave embed fails, the launcher
+        // degrades, and the harness falls through to a keyword search_entries
+        // (carrying no query_embedding) rather than aborting the whole turn.
+        let chat = mock_llama(false).await;
+        // Reserved-then-dropped port: the embeddings upstream refuses connections.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_embed = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        drop(listener);
+
+        let state = test_state_with_embeddings(Some(chat), Some(dead_embed));
+        let (envelope, reply_sk) = sealed_request(&state, "how was my week?");
+
+        let (status, reply) = post_chat(state, envelope).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let body = open_reply(&reply_sk, &reply);
+        let calls = body["tool_calls"].as_array().expect("expected a tool call");
+        assert_eq!(calls[0]["name"], "search_entries");
+        assert_eq!(calls[0]["arguments"]["query"], "how was my week?");
+        // Embed failed → no semantic embedding rides along; keyword-only fallback.
+        assert!(
+            calls[0]["arguments"].get("query_embedding").is_none(),
+            "expected keyword fallback, got a query_embedding"
+        );
+    }
+
+    #[test]
+    fn truncate_chars_caps_at_boundary_and_is_utf8_safe() {
+        let mut s = "abcdef".to_string();
+        truncate_chars(&mut s, 3);
+        assert_eq!(s, "abc");
+        // Already within bound: untouched.
+        let mut short = "ab".to_string();
+        truncate_chars(&mut short, 3);
+        assert_eq!(short, "ab");
+        // Counts chars, not bytes, and never splits a multi-byte char.
+        let mut multi = "áéíóú".to_string();
+        truncate_chars(&mut multi, 2);
+        assert_eq!(multi, "áé");
     }
 
     #[tokio::test]

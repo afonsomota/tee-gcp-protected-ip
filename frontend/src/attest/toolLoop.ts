@@ -58,7 +58,7 @@ export async function runToolLoop(
   const maxRounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
   let toolResults: ToolResult[] | undefined;
 
-  for (let round = 0; round <= maxRounds; round++) {
+  for (let round = 0; round < maxRounds; round++) {
     const turn = await sendTurn(toolResults);
 
     if (typeof turn.reply === "string") {

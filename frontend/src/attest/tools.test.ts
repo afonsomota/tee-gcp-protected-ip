@@ -154,6 +154,22 @@ describe("search_entries semantic ranking", () => {
     }
   });
 
+  it("ignores a non-finite query_embedding instead of scoring NaN", async () => {
+    // NaN/Infinity pass `typeof x === "number"`; a poisoned embedding must not
+    // turn ranking into NaN scores. It's dropped (treated as no embedding) and
+    // the search falls through to the keyword path, ranking deterministically.
+    const { db, key, ids } = await embeddedJournal();
+    const exec = makeToolExecutor(db, key);
+    const { result } = await exec({
+      id: "1",
+      name: "search_entries",
+      // "oranges" keyword-matches the Oranges entry; the embedding is ignored.
+      arguments: { query: "oranges", query_embedding: [0.1, NaN, 0.05] },
+    });
+    const r = result as { matches: { id: string }[] };
+    expect(r.matches[0].id).toBe(ids.oranges);
+  });
+
   it("falls back to recency when no entry has an embedding yet", async () => {
     // Reuse the keyword-seeded journal (no embeddings) but pass a query
     // embedding: nothing scores, so it returns the most-recent entries.

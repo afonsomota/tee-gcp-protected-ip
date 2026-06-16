@@ -210,10 +210,14 @@ fn chat(context: &Context) -> Option<Vec<u8>> {
         return answer(&context.messages, results);
     }
 
-    // We embedded the query last (enclave) — now ask the client to search with
-    // that embedding for semantic recall.
-    if let Some(embedding) = result_field(results, "embed", "embedding") {
-        return emit_search(&context.messages, Some(embedding.clone()));
+    // We asked to embed the query last turn (enclave). Now ask the client to
+    // search: carry the embedding for semantic recall when it came back, but if
+    // the embed failed (a result with no `embedding` — the launcher degrades a
+    // down embeddings server to this) fall through to a keyword search instead
+    // of re-embedding forever.
+    if has_result(results, "embed") {
+        let embedding = result_field(results, "embed", "embedding").cloned();
+        return emit_search(&context.messages, embedding);
     }
 
     // Fresh user turn. Embed the query first when the deployment offers it;

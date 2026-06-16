@@ -191,7 +191,14 @@ function semanticScore(entry: JournalEntry, queryEmbedding: number[], keywords: 
 
 /** Cosine similarity of two equal-length vectors; 0 for mismatched/zero vectors. */
 function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length === 0 || a.length !== b.length) return 0;
+  if (a.length === 0) return 0;
+  if (a.length !== b.length) {
+    // A dimension mismatch silently scores 0 (entries fall back to recency).
+    // Safe, but usually a sign the embedding model changed under stored vectors
+    // — log it so a future model swap is diagnosable rather than mysterious.
+    console.debug(`cosineSimilarity: dimension mismatch (${a.length} vs ${b.length}); scoring 0`);
+    return 0;
+  }
   let dot = 0;
   let normA = 0;
   let normB = 0;
@@ -204,9 +211,11 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-/** A numeric array argument, or undefined if absent/wrongly typed. */
+/** A finite-numeric array argument, or undefined if absent/wrongly typed.
+ *  Rejects `NaN`/`Infinity` (both pass `typeof x === "number"`) so they can't
+ *  poison a similarity score into `NaN`. */
 function numberArray(value: unknown): number[] | undefined {
-  return Array.isArray(value) && value.every((x) => typeof x === "number")
+  return Array.isArray(value) && value.every((x) => typeof x === "number" && Number.isFinite(x))
     ? (value as number[])
     : undefined;
 }
