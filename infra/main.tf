@@ -87,6 +87,24 @@ locals {
     # tee.launch_policy.allow_mount_destinations=/models.
     tee-mount = "type=tmpfs,source=tmpfs,destination=/models,size=${var.weights_tmpfs_bytes}"
   } : {}
+
+  # ---- Signed, encrypted harness delivery (issue #8) ------------------------
+  # The wasm harness rides the *same* envelope pipeline and the same KMS key as
+  # the weights, so it reuses local.artifact_kms_key / local.wip_audience and
+  # needs no extra IAM (the decrypt grant below already covers it). It is small
+  # and decrypted into guest memory, so there is no tmpfs mount.
+  harness_enabled = var.harness_object != null && var.harness_object != ""
+  harness_metadata = local.harness_enabled ? {
+    harness-bucket       = local.artifacts_bucket
+    harness-object       = var.harness_object
+    harness-kms-key      = local.artifact_kms_key
+    harness-wip-audience = local.wip_audience
+  } : {}
+
+  # Both artifacts share the bucket-read and KMS-decrypt grants, so those exist
+  # if *either* is delivered. With weights enabled (the usual case) this is
+  # unchanged, so prod plans zero-diff.
+  artifact_delivery_enabled = local.weights_enabled || local.harness_enabled
 }
 
 # Project number is needed to name the workload identity pool principalSet.
@@ -134,7 +152,7 @@ resource "google_project_iam_member" "ar_reader" {
 # the blobs are envelope-encrypted, so confidentiality rests on the KMS
 # decrypt grant below, not on this bucket ACL.
 resource "google_storage_bucket_iam_member" "artifacts_reader" {
-  count  = local.weights_enabled ? 1 : 0
+  count  = local.artifact_delivery_enabled ? 1 : 0
   bucket = local.artifacts_bucket
   role   = "roles/storage.objectViewer"
   member = "serviceAccount:${google_service_account.workload.email}"
@@ -147,7 +165,7 @@ resource "google_storage_bucket_iam_member" "artifacts_reader" {
 # workspaces deploying the same digest create the same binding twice; the
 # first `terraform destroy` removes it for both. Acceptable for dev churn.
 resource "google_kms_crypto_key_iam_member" "weights_decrypter" {
-  count         = local.weights_enabled && var.image_digest != null ? 1 : 0
+  count         = local.artifact_delivery_enabled && var.image_digest != null ? 1 : 0
   crypto_key_id = local.artifact_kms_key
   role          = "roles/cloudkms.cryptoKeyDecrypter"
   member        = "principalSet://iam.googleapis.com/${local.wip_pool}/attribute.image_digest/${var.image_digest}"
@@ -173,7 +191,7 @@ resource "time_sleep" "iam_propagation" {
   # already exist, and KMS IAM propagation takes minutes too. (The launcher
   # also retries delivery for ~5 minutes, covering the slow tail.)
   triggers = {
-    weights_decrypter_digest = local.weights_enabled && var.image_digest != null ? var.image_digest : ""
+    weights_decrypter_digest = local.artifact_delivery_enabled && var.image_digest != null ? var.image_digest : ""
   }
 
   create_duration = "120s"
@@ -249,6 +267,7 @@ resource "google_compute_instance" "cvm" {
     },
     local.tls_metadata,
     local.weights_metadata,
+    local.harness_metadata,
   )
 
   service_account {

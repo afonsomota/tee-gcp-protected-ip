@@ -6,6 +6,7 @@ mod acme_cache;
 mod artifacts;
 mod chat;
 mod gcp;
+mod harness;
 mod hpke_channel;
 mod keys;
 mod llama;
@@ -38,6 +39,10 @@ pub struct AppState {
     /// `host:port` of the llama-server `/chat` proxies to (see `llama.rs`);
     /// `None` when no model is configured.
     pub inference: Option<String>,
+    /// The signed, sandboxed wasm harness (issue #8) that owns prompt
+    /// orchestration. Filled asynchronously after delivery + signature check;
+    /// `/chat` serves 503 until it is ready (see `harness.rs`).
+    pub harness: Arc<harness::HarnessSlot>,
 }
 
 fn app(state: AppState) -> Router {
@@ -67,10 +72,16 @@ async fn main() {
         Some(upstream) => Some(upstream),
         None => llama::init_from_env(dev),
     };
+    // The harness rides issue #7's delivery pipeline (signed + encrypted), so
+    // it can lag boot; start the (backgrounded) load and hand `/chat` a slot
+    // that fills when the verified module is ready.
+    let harness_slot = Arc::new(harness::HarnessSlot::empty());
+    harness::init(dev, harness_slot.clone());
     let state = AppState {
         keys: Arc::new(keys::EnclaveKeys::generate()),
         dev,
         inference,
+        harness: harness_slot,
     };
     println!(
         "enclave key bindings: {} {}",
@@ -219,6 +230,7 @@ mod tests {
             keys: Arc::new(keys::EnclaveKeys::generate()),
             dev,
             inference: None,
+            harness: Arc::new(harness::HarnessSlot::empty()),
         }
     }
 

@@ -1,0 +1,23 @@
+[package]
+name = "harness"
+version = "0.1.0"
+edition = "2021"
+# This crate is built to wasm32-unknown-unknown and never linked into the
+# launcher as a Rust dependency — the launcher loads the compiled, *signed*
+# `harness.wasm` at runtime. See harness/README.md.
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# Small, deterministic-ish wasm: no unwinder (a panic aborts → a wasm trap the
+# host turns into a 502, carrying no plaintext), optimise for size.
+panic = "abort"
+opt-level = "s"
+strip = true
+lto = true

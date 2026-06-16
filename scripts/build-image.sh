@@ -37,13 +37,15 @@ cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
 DIST="$REPO_ROOT/dist"
 
-# ---- pinned inputs (recipe version 4) --------------------------------------
+# ---- pinned inputs (recipe version 5) --------------------------------------
 # v4: expose 8080/443 on the image so Confidential Space keeps the port open
 # (issue 004 TLS would otherwise be unreachable; see crane mutate below).
-RECIPE_VERSION=4
-# rust:1.88.0-alpine3.22, linux/amd64 platform image (not the multi-arch index)
-RUST_IMAGE="rust@sha256:64eba3726734dcfe89e0a62a0485007a3ab7c7372ce5b38c621d8812f70215f0"
-RUST_IMAGE_HUMAN="rust:1.88.0-alpine3.22 (linux/amd64)"
+# v5: Rust 1.88 → 1.94 (wasmtime 45, embedded for the issue #8 harness sandbox,
+# has an MSRV of 1.93). New toolchain changes the published digest D.
+RECIPE_VERSION=5
+# rust:1.94.0-alpine3.22, linux/amd64 platform image (not the multi-arch index)
+RUST_IMAGE="rust@sha256:df47a6adf941782a68df09a38e43fc3b5d80206f6d83036c32b2b76caea39e0b"
+RUST_IMAGE_HUMAN="rust:1.94.0-alpine3.22 (linux/amd64)"
 # Base image the launcher layer is appended onto: the official llama.cpp
 # server image, pinned to its linux/amd64 PLATFORM manifest digest (not the
 # multi-arch index — crane append needs a concrete image). Provides
@@ -114,7 +116,6 @@ docker run --rm --platform linux/amd64 \
     mkdir /build
     cp /src/Cargo.toml /src/Cargo.lock /build/
     cp -R /src/src /build/src
-    cp -R /src/prompts /build/prompts
     cd /build
     # CARGO_JOBS limits build parallelism only (helps memory-constrained or
     # emulated hosts); it has no effect on the produced bytes.

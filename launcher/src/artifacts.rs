@@ -67,6 +67,35 @@ const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 const RESOLVE_ATTEMPTS: u32 = 3;
 const RESOLVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The env-var and instance-metadata names for one artifact's delivery
+/// config. The weights (issue #7) and the wasm harness (issue #8) ride the
+/// *same* envelope pipeline, differing only in these names — so one resolver
+/// serves both. See `WEIGHTS` and `HARNESS`.
+struct ArtifactNames {
+    /// `WEIGHTS` / `HARNESS`: env-var prefix for the dev/test override.
+    env_prefix: &'static str,
+    /// `weights` / `harness`: instance-attribute prefix and log label.
+    attr_prefix: &'static str,
+}
+
+impl ArtifactNames {
+    fn env(&self, suffix: &str) -> String {
+        format!("{}_{suffix}", self.env_prefix)
+    }
+    fn attr(&self, suffix: &str) -> String {
+        format!("{}-{suffix}", self.attr_prefix)
+    }
+}
+
+const WEIGHTS: ArtifactNames = ArtifactNames {
+    env_prefix: "WEIGHTS",
+    attr_prefix: "weights",
+};
+const HARNESS: ArtifactNames = ArtifactNames {
+    env_prefix: "HARNESS",
+    attr_prefix: "harness",
+};
+
 struct Config {
     bucket: String,
     object: String,
@@ -77,47 +106,54 @@ struct Config {
 }
 
 impl Config {
-    /// Resolve weights configuration: `WEIGHTS_*` env vars first (dev/test
-    /// override; not operator-settable in production, see module docs), then
-    /// GCE instance metadata attributes. `Ok(None)` = weights delivery not
-    /// configured; partial configuration and metadata-server failures are
-    /// errors, never a silent fallback — a deployment that configured
-    /// delivery must not quietly boot without it.
-    async fn resolve(dev: bool) -> Result<Option<Config>, String> {
-        let env = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
-        if let Some(object) = env("WEIGHTS_OBJECT") {
-            let require = |name: &str| {
-                env(name).ok_or_else(|| format!("WEIGHTS_OBJECT is set but {name} is not"))
+    /// Resolve an artifact's delivery configuration: `<PREFIX>_*` env vars
+    /// first (dev/test override; not operator-settable in production, see
+    /// module docs), then GCE instance metadata attributes `<prefix>-*`.
+    /// `Ok(None)` = delivery not configured; partial configuration and
+    /// metadata-server failures are errors, never a silent fallback — a
+    /// deployment that configured delivery must not quietly boot without it.
+    async fn resolve(dev: bool, names: &ArtifactNames) -> Result<Option<Config>, String> {
+        let env = |name: String| std::env::var(&name).ok().filter(|v| !v.is_empty());
+        if let Some(object) = env(names.env("OBJECT")) {
+            let require = |suffix: &str| {
+                let name = names.env(suffix);
+                env(name.clone()).ok_or_else(|| {
+                    format!("{} is set but {name} is not", names.env("OBJECT"))
+                })
             };
             return Ok(Some(Config {
-                bucket: require("WEIGHTS_BUCKET")?,
+                bucket: require("BUCKET")?,
                 object,
-                kms_key: require("WEIGHTS_KMS_KEY")?,
+                kms_key: require("KMS_KEY")?,
                 // No audience = plain service-account KMS auth: acceptable
                 // only here, in the env-driven dev/test path.
-                wip_audience: env("WEIGHTS_WIP_AUDIENCE"),
+                wip_audience: env(names.env("WIP_AUDIENCE")),
             }));
         }
         if dev {
             // Dev machines have no metadata server; don't probe for one.
             return Ok(None);
         }
-        let Some(object) = crate::gcp::instance_attribute("weights-object").await? else {
+        let Some(object) = crate::gcp::instance_attribute(&names.attr("object")).await? else {
             return Ok(None);
         };
-        let require = |name: &'static str| async move {
-            crate::gcp::instance_attribute(name).await?.ok_or_else(|| {
-                format!("weights-object is set but metadata attribute {name} is missing")
-            })
+        let require = |suffix: &str| {
+            let name = names.attr(suffix);
+            let object_attr = names.attr("object");
+            async move {
+                crate::gcp::instance_attribute(&name).await?.ok_or_else(|| {
+                    format!("{object_attr} is set but metadata attribute {name} is missing")
+                })
+            }
         };
         Ok(Some(Config {
-            bucket: require("weights-bucket").await?,
+            bucket: require("bucket").await?,
             object,
-            kms_key: require("weights-kms-key").await?,
+            kms_key: require("kms-key").await?,
             // Mandatory in production: KMS must authenticate via the
             // attested federated token. A missing audience must never
             // downgrade to the (non-attested) service-account token.
-            wip_audience: Some(require("weights-wip-audience").await?),
+            wip_audience: Some(require("wip-audience").await?),
         }))
     }
 }
@@ -126,7 +162,7 @@ impl Config {
 /// and return the inference upstream `/chat` should (eventually) reach.
 /// `None` = not configured; the caller falls back to `llama::init_from_env`.
 pub async fn init(dev: bool) -> Option<String> {
-    let config = resolve_with_retries(dev).await?;
+    let config = resolve_with_retries(dev, &WEIGHTS).await?;
     println!(
         "weights: delivering gs://{}/{} (KMS {})",
         config.bucket, config.object, config.kms_key
@@ -152,19 +188,23 @@ pub async fn init(dev: bool) -> Option<String> {
     Some(upstream)
 }
 
-async fn resolve_with_retries(dev: bool) -> Option<Config> {
+async fn resolve_with_retries(dev: bool, names: &ArtifactNames) -> Option<Config> {
     for attempt in 1..=RESOLVE_ATTEMPTS {
-        match Config::resolve(dev).await {
+        match Config::resolve(dev, names).await {
             Ok(config) => return config,
-            Err(e) => {
-                eprintln!("weights: config resolution {attempt}/{RESOLVE_ATTEMPTS} failed: {e}")
-            }
+            Err(e) => eprintln!(
+                "{}: config resolution {attempt}/{RESOLVE_ATTEMPTS} failed: {e}",
+                names.attr_prefix
+            ),
         }
         if attempt < RESOLVE_ATTEMPTS {
             tokio::time::sleep(RESOLVE_RETRY_DELAY).await;
         }
     }
-    eprintln!("weights: cannot resolve configuration; weights delivery disabled for this boot");
+    eprintln!(
+        "{0}: cannot resolve configuration; {0} delivery disabled for this boot",
+        names.attr_prefix
+    );
     None
 }
 
@@ -178,6 +218,12 @@ struct Manifest {
     plaintext_size: u64,
     plaintext_sha256: String,
     ciphertext_object: String,
+    /// Base64 detached Ed25519 signature over the decrypted plaintext. Present
+    /// for the harness (issue #8), where the launcher verifies it against the
+    /// pinned company key; absent for weights, where integrity rests on the
+    /// SHA-256 above. `serde(default)` so weights manifests parse unchanged.
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 impl Manifest {
@@ -197,9 +243,13 @@ impl Manifest {
     }
 }
 
-/// Fetch the manifest, unwrap the DEK as the attested principal, stream the
-/// ciphertext through the decryptor onto tmpfs, verify, and return the path.
-async fn deliver(config: &Config) -> Result<String, String> {
+/// Fetch + parse the manifest and unwrap its DEK as the attested principal —
+/// the attestation-gated step shared by both artifacts. Returns the GCS token
+/// (reused for the ciphertext download), the manifest, the unwrapped DEK, and
+/// the decoded nonce prefix.
+async fn fetch_manifest_and_key(
+    config: &Config,
+) -> Result<(String, Manifest, Vec<u8>, Vec<u8>), String> {
     let gcs_token = crate::gcp::metadata_access_token().await?;
     let manifest =
         Manifest::parse(&crate::gcp::gcs_get(&gcs_token, &config.bucket, &config.object).await?)?;
@@ -207,17 +257,62 @@ async fn deliver(config: &Config) -> Result<String, String> {
     let wrapped_dek = B64
         .decode(&manifest.wrapped_dek)
         .map_err(|e| format!("manifest wrapped_dek is not base64: {e}"))?;
-    // The attestation-gated step: only an attested workload running the
-    // expected image digest can make this call succeed.
-    let dek = crate::gcp::kms_decrypt(
-        &config.kms_key,
-        config.wip_audience.as_deref(),
-        &wrapped_dek,
-    )
-    .await?;
+    // Only an attested workload running the expected image digest can make
+    // this KMS call succeed.
+    let dek =
+        crate::gcp::kms_decrypt(&config.kms_key, config.wip_audience.as_deref(), &wrapped_dek)
+            .await?;
     let nonce_prefix = B64
         .decode(&manifest.nonce_prefix)
         .map_err(|e| format!("manifest nonce_prefix is not base64: {e}"))?;
+    Ok((gcs_token, manifest, dek, nonce_prefix))
+}
+
+/// Deliver the signed wasm harness (issue #8) over the same KMS-gated envelope
+/// pipeline as the weights. The artifact is small, so it is decrypted fully
+/// into guest memory (a `Vec`) — never to disk. Returns `(wasm, signature)`;
+/// the caller (`harness.rs`) verifies the detached Ed25519 signature against
+/// the pinned company key before instantiating. `Ok(None)` = not configured.
+pub async fn deliver_harness(dev: bool) -> Result<Option<(Vec<u8>, Vec<u8>)>, String> {
+    let Some(config) = Config::resolve(dev, &HARNESS).await? else {
+        return Ok(None);
+    };
+    println!(
+        "harness: delivering gs://{}/{} (KMS {})",
+        config.bucket, config.object, config.kms_key
+    );
+    let (gcs_token, manifest, dek, nonce_prefix) = fetch_manifest_and_key(&config).await?;
+
+    // The harness manifest must carry the signature; weights manifests do not.
+    let signature = B64
+        .decode(
+            manifest
+                .signature
+                .as_deref()
+                .ok_or("harness manifest is missing the required `signature` field")?,
+        )
+        .map_err(|e| format!("harness manifest signature is not base64: {e}"))?;
+
+    let mut wasm = Vec::new();
+    let (size, sha256) =
+        stream_into(&gcs_token, &config, &manifest, &dek, &nonce_prefix, &mut wasm).await?;
+    if size != manifest.plaintext_size || hex::encode(sha256) != manifest.plaintext_sha256 {
+        return Err(format!(
+            "decrypted harness does not match the manifest: got {size} bytes / sha256 {}, \
+             expected {} bytes / sha256 {}",
+            hex::encode(sha256),
+            manifest.plaintext_size,
+            manifest.plaintext_sha256
+        ));
+    }
+    println!("harness: decrypted {size} bytes (sha256 verified; signature checked on load)");
+    Ok(Some((wasm, signature)))
+}
+
+/// Fetch the manifest, unwrap the DEK as the attested principal, stream the
+/// ciphertext through the decryptor onto tmpfs, verify, and return the path.
+async fn deliver(config: &Config) -> Result<String, String> {
+    let (gcs_token, manifest, dek, nonce_prefix) = fetch_manifest_and_key(config).await?;
 
     let dest = std::env::var("WEIGHTS_DEST").unwrap_or_else(|_| DEFAULT_DEST.to_string());
     // Any failure must remove the partial plaintext: the tmpfs is guest RAM,
@@ -257,12 +352,29 @@ async fn stream_decrypt_to(
 ) -> Result<(u64, [u8; 32]), String> {
     let file = std::fs::File::create(dest)
         .map_err(|e| format!("cannot create {dest} (is the tmpfs mounted?): {e}"))?;
-    let mut decryptor = EnvelopeDecryptor::new(
+    stream_into(
+        gcs_token,
+        config,
+        manifest,
         dek,
         nonce_prefix,
-        manifest.chunk_size,
         std::io::BufWriter::new(file),
-    )?;
+    )
+    .await
+}
+
+/// Stream `manifest.ciphertext_object` through the envelope decryptor into an
+/// arbitrary sink (a tmpfs file for weights, an in-memory `Vec` for the
+/// harness); returns the plaintext size and SHA-256 for the manifest check.
+async fn stream_into<W: Write>(
+    gcs_token: &str,
+    config: &Config,
+    manifest: &Manifest,
+    dek: &[u8],
+    nonce_prefix: &[u8],
+    sink: W,
+) -> Result<(u64, [u8; 32]), String> {
+    let mut decryptor = EnvelopeDecryptor::new(dek, nonce_prefix, manifest.chunk_size, sink)?;
     let mut body =
         crate::gcp::gcs_get_stream(gcs_token, &config.bucket, &manifest.ciphertext_object).await?;
     while let Some(frame) = body.frame().await {
@@ -522,5 +634,36 @@ mod tests {
     fn rejects_bad_key_material() {
         assert!(EnvelopeDecryptor::new(&[0; 16], &[0; 7], 32, Vec::new()).is_err());
         assert!(EnvelopeDecryptor::new(&[0; 32], &[0; 12], 32, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn manifest_signature_is_optional_and_round_trips() {
+        let base = serde_json::json!({
+            "format": ENVELOPE_FORMAT,
+            "cipher": ENVELOPE_CIPHER,
+            "chunk_size": 4194304,
+            "nonce_prefix": "AAAAAAAAAA==",
+            "wrapped_dek": "AAAA",
+            "plaintext_size": 1,
+            "plaintext_sha256": "00",
+            "ciphertext_object": "harness/harness.wasm.enc",
+        });
+        // Weights manifests carry no signature → None (the harness path then
+        // refuses delivery; weights never reach that check).
+        assert!(Manifest::parse(base.to_string().as_bytes())
+            .unwrap()
+            .signature
+            .is_none());
+
+        // Harness manifests carry the base64 company signature.
+        let mut signed = base.clone();
+        signed["signature"] = serde_json::json!("c2lnbmF0dXJl");
+        assert_eq!(
+            Manifest::parse(signed.to_string().as_bytes())
+                .unwrap()
+                .signature
+                .as_deref(),
+            Some("c2lnbmF0dXJl")
+        );
     }
 }
