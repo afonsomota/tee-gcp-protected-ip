@@ -19,8 +19,20 @@
  */
 import { createRemoteJWKSet, decodeJwt, jwtVerify, type JWTPayload } from "jose";
 
-export const GOOGLE_OIDC_CONFIG_URL =
-  "https://confidentialcomputing.googleapis.com/.well-known/openid-configuration";
+/**
+ * Confidential Space token issuer, and its JWKS endpoint.
+ *
+ * We point `createRemoteJWKSet` straight at the JWKS URL rather than fetching
+ * the OIDC discovery document to learn it. The discovery endpoint
+ * (`.../.well-known/openid-configuration`) returns NO `Access-Control-Allow-Origin`
+ * header, so any in-browser fetch of it is blocked by CORS — which silently
+ * broke signature verification on every web origin (issue #41). The JWKS URL is
+ * a stable, CORS-enabled endpoint, so the discovery round-trip is both
+ * unnecessary and harmful here.
+ */
+export const GOOGLE_TOKEN_ISSUER = "https://confidentialcomputing.googleapis.com";
+export const GOOGLE_JWKS_URL =
+  "https://www.googleapis.com/service_accounts/v1/metadata/jwk/signer@confidentialspace-sign.iam.gserviceaccount.com";
 export const DEV_ISSUER = "urn:tee-example:dev-unverified";
 
 export type FailureCode =
@@ -86,9 +98,11 @@ export async function verifyTokenSignature(
     return { claims, signatureVerified: false };
   }
   try {
-    const config = (await (await fetch(GOOGLE_OIDC_CONFIG_URL)).json()) as { jwks_uri: string };
-    const jwks = createRemoteJWKSet(new URL(config.jwks_uri));
-    const { payload } = await jwtVerify<AttestationClaims>(token, jwks, { audience });
+    const jwks = createRemoteJWKSet(new URL(GOOGLE_JWKS_URL));
+    const { payload } = await jwtVerify<AttestationClaims>(token, jwks, {
+      audience,
+      issuer: GOOGLE_TOKEN_ISSUER,
+    });
     return { claims: payload, signatureVerified: true };
   } catch (err) {
     throw new AttestationError(
