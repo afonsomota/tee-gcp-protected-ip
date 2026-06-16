@@ -102,6 +102,9 @@ export async function verifyTokenSignature(
     const { payload } = await jwtVerify<AttestationClaims>(token, jwks, {
       audience,
       issuer: GOOGLE_TOKEN_ISSUER,
+      // Confidential Space tokens are RS256, and so are the JWKS keys; pin it
+      // so algorithm selection is explicit on this audited path.
+      algorithms: ["RS256"],
     });
     return { claims: payload, signatureVerified: true };
   } catch (err) {

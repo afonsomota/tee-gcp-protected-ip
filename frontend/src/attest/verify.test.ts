@@ -6,6 +6,7 @@
  * blocked by CORS — which silently broke signature verification on every web
  * origin (issue #41). Verification must reach only the CORS-enabled JWKS URL.
  */
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AttestationError,
@@ -89,5 +90,54 @@ describe("verifyTokenSignature JWKS fetch (issue #41 regression)", () => {
     const result = await verifyTokenSignature(token, AUD, true);
     expect(result.signatureVerified).toBe(false);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The issuer check is load-bearing: dropping discovery removed the implicit
+ * issuer validation (the discovery endpoint was issuer-namespaced), so the
+ * explicit `issuer` option in jwtVerify is now the only thing rejecting a
+ * Google-signed token from the wrong issuer. These tests mint a real RS256
+ * key, expose its public JWK at the stubbed JWKS endpoint, and exercise the
+ * full signature path — so a future refactor that drops `issuer` (or the
+ * RS256 algorithm pin) fails here instead of silently widening trust.
+ */
+describe("verifyTokenSignature issuer + signature path", () => {
+  async function signedTokenAndJWKS(iss: string): Promise<string> {
+    const { publicKey, privateKey } = await generateKeyPair("RS256");
+    const jwk = { ...(await exportJWK(publicKey)), kid: "test", alg: "RS256" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ keys: [jwk] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      ),
+    );
+    return new SignJWT({})
+      .setProtectedHeader({ alg: "RS256", kid: "test" })
+      .setIssuer(iss)
+      .setAudience(AUD)
+      .sign(privateKey);
+  }
+
+  it("rejects a validly-signed token whose issuer is not the Confidential Space issuer", async () => {
+    const token = await signedTokenAndJWKS("https://evil.example.com");
+    try {
+      await verifyTokenSignature(token, AUD, false);
+      throw new Error("expected rejection");
+    } catch (err) {
+      expect(err).toBeInstanceOf(AttestationError);
+      expect((err as AttestationError).code).toBe("TOKEN_SIGNATURE_INVALID");
+    }
+  });
+
+  it("accepts a validly-signed token with the correct issuer and audience", async () => {
+    const token = await signedTokenAndJWKS(GOOGLE_TOKEN_ISSUER);
+    const result = await verifyTokenSignature(token, AUD, false);
+    expect(result.signatureVerified).toBe(true);
   });
 });
