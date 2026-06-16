@@ -7,8 +7,11 @@ live in launcher/tests/fixtures/artifact-envelope.json (regenerate with
 provision-weights.py --write-fixture and re-run cargo test on any change).
 """
 
+import base64
+import hashlib
 import importlib.util
 import io
+import json as jsonlib
 import pathlib
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -201,3 +204,124 @@ def test_stall_guard_allows_steady_progress():
     guard.update(5000)           # plenty of progress: window resets
     now[0] = 22.0
     guard.update(11000)          # still healthy: no raise
+
+
+# ---- upload integrity checksum (offline; fake GCS) --------------------------
+
+def _b64_md5(data: bytes) -> str:
+    return base64.b64encode(hashlib.md5(data).digest()).decode()
+
+
+def _parse_multipart(body: bytes, content_type: str):
+    """Split a multipart/related body into (headers, payload) parts."""
+    boundary = content_type.split("boundary=", 1)[1].encode()
+    out = []
+    for chunk in body.split(b"--" + boundary)[1:-1]:
+        if chunk.startswith(b"\r\n"):
+            chunk = chunk[2:]
+        head, _, payload = chunk.partition(b"\r\n\r\n")
+        out.append((head.decode(), payload[:-2]))  # drop the trailing CRLF
+    return out
+
+
+class FakeResp:
+    def __init__(self, status=200, headers=None):
+        self.status_code = status
+        self.headers = headers or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise pw.requests.HTTPError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return {}
+
+
+class FakeGcs:
+    """Stands in for the GCS JSON upload API: recomputes the md5 of the bytes
+    it receives and compares it to the declared md5Hash, exactly as the server
+    does, returning 400 on a mismatch. ``corrupt=True`` flips a byte in transit
+    to prove a corrupted upload is rejected at provisioning time."""
+
+    def __init__(self, corrupt=False):
+        self.corrupt = corrupt
+        self.declared_md5 = None    # md5Hash from a resumable session init
+        self.object_name = None
+        self.received = []          # (name, accepted) per finalized object
+
+    def _finalize(self, name, declared_md5, data):
+        if self.corrupt:
+            data = bytearray(data)
+            data[0] ^= 1
+        accepted = _b64_md5(bytes(data)) == declared_md5
+        self.received.append((name, accepted))
+        return FakeResp(200 if accepted else 400)
+
+    def post(self, url, params=None, headers=None, json=None, data=None, timeout=None):
+        if params.get("uploadType") == "multipart":
+            meta_part, data_part = _parse_multipart(data, headers["Content-Type"])
+            meta = jsonlib.loads(meta_part[1])
+            return self._finalize(meta["name"], meta["md5Hash"], data_part[1])
+        # resumable session init: stash the declared md5, hand back a session URL
+        self.declared_md5 = json["md5Hash"]
+        self.object_name = json["name"]
+        return FakeResp(200, headers={"Location": "http://upload.test/session"})
+
+    def put(self, url, headers=None, data=None, timeout=None):
+        body = data.read() if hasattr(data, "read") else data
+        return self._finalize(self.object_name, self.declared_md5, body)
+
+
+def test_small_upload_declares_md5_of_the_payload(monkeypatch):
+    captured = {}
+
+    def fake_post(url, params=None, headers=None, json=None, data=None, timeout=None):
+        assert params["uploadType"] == "multipart"
+        meta_part, data_part = _parse_multipart(data, headers["Content-Type"])
+        captured["meta"] = jsonlib.loads(meta_part[1])
+        captured["data"] = data_part[1]
+        return FakeResp(200)
+
+    monkeypatch.setattr(pw.requests, "post", fake_post)
+    payload = b'{"format": "tee-example/artifact-envelope/v1"}'
+    pw.gcs_upload_small("tok", "bucket", "m.manifest.json", payload)
+    assert captured["data"] == payload                       # bytes survived intact
+    assert captured["meta"]["md5Hash"] == _b64_md5(payload)  # and the checksum matches
+
+
+def test_small_upload_accepted_when_md5_matches(monkeypatch):
+    gcs = FakeGcs()
+    monkeypatch.setattr(pw.requests, "post", gcs.post)
+    pw.gcs_upload_small("tok", "bucket", "m.manifest.json", b"manifest bytes")
+    assert gcs.received == [("m.manifest.json", True)]
+
+
+def test_corrupted_small_upload_is_rejected(monkeypatch):
+    gcs = FakeGcs(corrupt=True)
+    monkeypatch.setattr(pw.requests, "post", gcs.post)
+    with pytest.raises(pw.requests.HTTPError):
+        pw.gcs_upload_small("tok", "bucket", "m.manifest.json", b"manifest bytes")
+    assert gcs.received == [("m.manifest.json", False)]
+
+
+def test_resumable_upload_declares_file_md5_and_is_accepted(tmp_path, monkeypatch):
+    gcs = FakeGcs()
+    monkeypatch.setattr(pw.requests, "post", gcs.post)
+    monkeypatch.setattr(pw.requests, "put", gcs.put)
+    payload = bytes(i % 251 for i in range(10_000))
+    ct = tmp_path / "weights.gguf.enc"
+    ct.write_bytes(payload)
+    pw.gcs_upload_resumable("tok", "bucket", "weights.gguf.enc", ct)
+    assert gcs.declared_md5 == _b64_md5(payload)
+    assert gcs.received == [("weights.gguf.enc", True)]
+
+
+def test_corrupted_resumable_upload_is_rejected(tmp_path, monkeypatch):
+    gcs = FakeGcs(corrupt=True)
+    monkeypatch.setattr(pw.requests, "post", gcs.post)
+    monkeypatch.setattr(pw.requests, "put", gcs.put)
+    ct = tmp_path / "weights.gguf.enc"
+    ct.write_bytes(b"ciphertext" * 500)
+    with pytest.raises(pw.requests.HTTPError):
+        pw.gcs_upload_resumable("tok", "bucket", "weights.gguf.enc", ct)
+    assert gcs.received[-1] == ("weights.gguf.enc", False)
