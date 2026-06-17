@@ -10,6 +10,10 @@
 #     Overflowing it makes every KMS artifact delivery fail the STS token
 #     exchange with 400 "google.subject exceeds the 127 byte" (issue #49), so
 #     the suffix is bounded by 127 - 81 - len(project) - len(zone) too.
+#     Assumption: the sub carries the project *id* (string), not the numeric
+#     project number — confirmed by #49's live 400 hitting the limit at exactly
+#     the project-id length. If GCP ever emitted the number instead, this
+#     budget would track the wrong field and #49 could silently regress.
 # Long slugs are truncated and given a short hash of the full branch name so
 # distinct branches can't collide.
 #
