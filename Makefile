@@ -100,7 +100,7 @@ destroy: require-project require-digest
 # buildx path — non-reproducible digest, dev only. The CVM gets an ephemeral
 # external IP (printed at the end); prod keeps the static one.
 dev-deploy: require-project
-	@suffix=$$(scripts/dev-slug.sh); \
+	@suffix=$$(PROJECT_ID=$(PROJECT_ID) scripts/dev-slug.sh); \
 	image=$(IMAGE_REPO):$$suffix; \
 	echo "==> dev deployment $$suffix"; \
 	docker buildx build --platform linux/amd64 -t $$image --push launcher/; \
@@ -118,7 +118,7 @@ dev-deploy: require-project
 
 ## dev-destroy: tear down this branch's dev deployment only
 dev-destroy: require-project
-	@suffix=$$(scripts/dev-slug.sh); \
+	@suffix=$$(PROJECT_ID=$(PROJECT_ID) scripts/dev-slug.sh); \
 	terraform -chdir=infra workspace select $$suffix \
 	  || { echo "no workspace '$$suffix' — nothing deployed for this branch?"; exit 1; }; \
 	terraform -chdir=infra destroy -var project_id=$(PROJECT_ID) -var deployment_suffix=$$suffix \
