@@ -1,10 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessage, ToolActivity } from "../attest/chat";
 import { hpkeChat } from "../attest/chat";
-import type { AttestationStatus } from "../attest/session";
-import { NETWORK_ERROR_CODE, runAttestation } from "../attest/session";
 import { makeToolExecutor } from "../attest/tools";
-import { AttestationError } from "../attest/verify";
+import type { EnclaveSession } from "../attest/useEnclaveSession";
 import { config } from "../lib/config";
 import type { JournalDb } from "../lib/store";
 import { AttestationBadge } from "./AttestationBadge";
@@ -13,6 +11,8 @@ interface Props {
   /** The unlocked journal — the client tools read and write entries through it. */
   db: JournalDb;
   journalKey: CryptoKey;
+  /** The shared, verified enclave session (attestation + pinned HPKE key). */
+  session: EnclaveSession;
 }
 
 /**
@@ -24,8 +24,8 @@ type ChatItem =
   | { kind: "message"; role: "user" | "assistant"; content: string }
   | { kind: "tool"; activity: ToolActivity };
 
-export function ChatPane({ db, journalKey }: Props) {
-  const [attestStatus, setAttestStatus] = useState<AttestationStatus>({ kind: "idle" });
+export function ChatPane({ db, journalKey, session }: Props) {
+  const { status: attestStatus, verify } = session;
   const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -35,30 +35,6 @@ export function ChatPane({ db, journalKey }: Props) {
   // The tool executor is bound to the unlocked journal; rebuild it only if the
   // db or key changes (e.g. after a re-unlock).
   const executeTool = useMemo(() => makeToolExecutor(db, journalKey), [db, journalKey]);
-
-  const verify = useCallback(async () => {
-    setAttestStatus({ kind: "verifying" });
-    try {
-      const result = await runAttestation(config.apiEndpoint, config.expectedImageDigest);
-      setAttestStatus({ kind: "verified", ...result });
-    } catch (err) {
-      const code = err instanceof AttestationError ? err.code : NETWORK_ERROR_CODE;
-      const detail = err instanceof Error ? err.message : String(err);
-      setAttestStatus({ kind: "failed", code, detail });
-    }
-  }, []);
-
-  useEffect(() => {
-    void verify();
-  }, [verify]);
-
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState === "visible") void verify();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [verify]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });

@@ -162,6 +162,24 @@ textarea {
   color: var(--muted);
 }
 
+/* Enrichment indicators in the entry list (issue #11). */
+.entry-enriched,
+.entry-enriching {
+  font-size: 0.8rem;
+}
+.entry-enriching {
+  animation: enriching-pulse 1.2s ease-in-out infinite;
+}
+@keyframes enriching-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
 .sidebar footer {
   display: flex;
   gap: 0.4rem;

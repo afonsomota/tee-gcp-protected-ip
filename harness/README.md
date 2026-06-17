@@ -22,10 +22,24 @@ skeptical auditors read.
 
 ## What it does
 
-`src/lib.rs` is the whole thing. `run()` parses `{"messages":[...]}`, prepends
-the (closed) system prompt, calls the host model, and returns `{"reply":"..."}`.
-The ABI it shares with the launcher is documented at the top of that file and
-mirrored in `launcher/src/harness.rs`.
+`src/lib.rs` is the whole thing. `run()` parses the chat context and routes by
+task:
+
+- **chat** — when the deployment offers an `embed` tool, it first asks the
+  enclave to embed the query (semantic recall), then asks the client to
+  `search_entries` with that embedding, then prepends the (closed) system prompt
+  and the retrieved entries and calls the host model for `{"reply":"..."}`.
+  Without `embed` it goes straight to a keyword search.
+- **enrich** — on entry save, it asks the enclave to `summarize`,
+  `extract_metadata`, and (when available) `embed` the entry, folds the results
+  into one enrichment object, and asks the client to `attach_metadata`.
+
+The orchestration — *which* tools to call and *when* — is the secret sauce; the
+tools themselves (the embed/summarize/extract primitives in-enclave, and the
+client's local search/store) live outside this sandbox. The ABI it shares with
+the launcher is documented at the top of `src/lib.rs` and mirrored in
+`launcher/src/harness.rs`; the launcher re-validates every tool call the harness
+emits against its manifest.
 
 The prompt text lives outside the code in `prompts/` (`prompts/system.md`
 today), embedded into the wasm at build time via `include_str!` — the sandbox
@@ -62,11 +76,17 @@ cd launcher
 HARNESS_PATH=tests/fixtures/harness/harness.wasm \
 HARNESS_SIG_PATH=tests/fixtures/harness/harness.wasm.sig \
 LLAMA_UPSTREAM=127.0.0.1:8081 \
+LLAMA_EMBED_UPSTREAM=127.0.0.1:8082 \
   cargo run -- --dev
 ```
 
 Without `HARNESS_PATH`/`HARNESS_SIG_PATH`, `/chat` serves 503 (the launcher
-refuses to run unsigned or undelivered orchestration).
+refuses to run unsigned or undelivered orchestration). `LLAMA_EMBED_UPSTREAM`
+(or `LLAMA_EMBED_MODEL_PATH`) is optional: point it at a second `llama-server`
+started with `--embeddings` to exercise semantic search and entry enrichment's
+embedding step; omit it and search falls back to keywords (the `embed` tool is
+dropped from the manifest). Both `LLAMA_*_UPSTREAM` overrides are honored only
+in `--dev`.
 
 ## Keys
 

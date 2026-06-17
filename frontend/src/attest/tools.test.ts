@@ -107,6 +107,93 @@ describe("search_entries", () => {
   });
 });
 
+describe("search_entries semantic ranking", () => {
+  // Three entries with distinct unit-ish embeddings so cosine similarity has a
+  // clear winner. Query text is deliberately a non-match so ranking is purely
+  // semantic (keyword overlap = 0).
+  async function embeddedJournal() {
+    const db = await openJournalDb(freshName());
+    const { key } = await db.unlock("pw", testParams);
+    const make = (title: string, embedding: number[], createdAt: string): JournalEntry => ({
+      ...newEntry(title, `body of ${title}`),
+      createdAt,
+      updatedAt: createdAt,
+      enrichment: { embedding, enrichedAt: createdAt },
+    });
+    const apples = make("Apples", [1, 0, 0], "2026-01-01T00:00:00Z");
+    const oranges = make("Oranges", [0, 1, 0], "2026-02-01T00:00:00Z");
+    const pears = make("Pears", [0, 0, 1], "2026-03-01T00:00:00Z");
+    for (const e of [apples, oranges, pears]) await db.putEntry(key, e);
+    return { db, key, ids: { apples: apples.id, oranges: oranges.id, pears: pears.id } };
+  }
+
+  it("ranks by embedding similarity when a query_embedding is provided", async () => {
+    const { db, key, ids } = await embeddedJournal();
+    const exec = makeToolExecutor(db, key);
+    const { result } = await exec({
+      id: "1",
+      name: "search_entries",
+      // Closest to the "oranges" embedding [0,1,0].
+      arguments: { query: "no keyword overlap here", query_embedding: [0.1, 0.95, 0.05] },
+    });
+    const r = result as { matches: { id: string }[] };
+    expect(r.matches[0].id).toBe(ids.oranges);
+  });
+
+  it("never sends the stored embedding to the enclave, only the readable fields", async () => {
+    const { db, key } = await embeddedJournal();
+    const exec = makeToolExecutor(db, key);
+    const { result } = await exec({
+      id: "1",
+      name: "search_entries",
+      arguments: { query: "x", query_embedding: [1, 0, 0], limit: 3 },
+    });
+    const r = result as { matches: { enrichment?: Record<string, unknown> }[] };
+    for (const match of r.matches) {
+      expect(match.enrichment?.embedding).toBeUndefined();
+    }
+  });
+
+  it("ignores a non-finite query_embedding instead of scoring NaN", async () => {
+    // NaN/Infinity pass `typeof x === "number"`; a poisoned embedding must not
+    // turn ranking into NaN scores. It's dropped (treated as no embedding) and
+    // the search falls through to the keyword path, ranking deterministically.
+    const { db, key, ids } = await embeddedJournal();
+    const exec = makeToolExecutor(db, key);
+    const { result } = await exec({
+      id: "1",
+      name: "search_entries",
+      // "oranges" keyword-matches the Oranges entry; the embedding is ignored.
+      arguments: { query: "oranges", query_embedding: [0.1, NaN, 0.05] },
+    });
+    const r = result as { matches: { id: string }[] };
+    expect(r.matches[0].id).toBe(ids.oranges);
+  });
+
+  it("falls back to recency when no entry has an embedding yet", async () => {
+    // Reuse the keyword-seeded journal (no embeddings) but pass a query
+    // embedding: nothing scores, so it returns the most-recent entries.
+    const db = await openJournalDb(freshName());
+    const { key } = await db.unlock("pw", testParams);
+    const make = (title: string, createdAt: string): JournalEntry => ({
+      ...newEntry(title, "no embedding"),
+      createdAt,
+      updatedAt: createdAt,
+    });
+    const old = make("Old", "2026-01-01T00:00:00Z");
+    const recent = make("Recent", "2026-03-01T00:00:00Z");
+    for (const e of [old, recent]) await db.putEntry(key, e);
+
+    const { result } = await makeToolExecutor(db, key)({
+      id: "1",
+      name: "search_entries",
+      arguments: { query: "zzz", query_embedding: [1, 2, 3], limit: 1 },
+    });
+    const r = result as { matches: { id: string }[] };
+    expect(r.matches[0].id).toBe(recent.id);
+  });
+});
+
 describe("attach_metadata", () => {
   it("merges harness-provided enrichment into the stored, encrypted entry", async () => {
     const { db, key, ids } = await seededJournal();

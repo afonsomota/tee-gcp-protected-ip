@@ -205,17 +205,29 @@ terraform -chdir=infra/bootstrap apply -var project_id=YOUR_PROJECT_ID \
 # Encrypt + upload the weights; prints the weights_object to set
 ./scripts/provision-weights.py --project YOUR_PROJECT_ID
 
+# Optional (issue #11): the embeddings model (EmbeddingGemma) for semantic
+# search. Same pipeline + KMS key — no extra grant; sets embed_weights_object.
+./scripts/provision-weights.py --project YOUR_PROJECT_ID \
+  --model-url https://.../embeddinggemma.gguf
+
 # Build + sign the harness, then encrypt + upload it the same way (issue #8);
 # prints the harness_object to set. Rides the same KMS key — no extra grant.
 ./scripts/build-harness.sh
 ./scripts/provision-harness.py --project YOUR_PROJECT_ID
 
-# Add both to infra/terraform.tfvars and (re)apply — make deploy only passes
+# Add them to infra/terraform.tfvars and (re)apply — make deploy only passes
 # project_id and image_digest, the rest auto-loads from tfvars
 echo 'weights_object = "weights/gemma-4-E2B_q4_0-it.gguf.manifest.json"' >> infra/terraform.tfvars
+echo 'embed_weights_object = "weights/embeddinggemma.gguf.manifest.json"' >> infra/terraform.tfvars  # optional
 echo 'harness_object = "harness/harness.wasm.manifest.json"' >> infra/terraform.tfvars
 terraform -chdir=infra apply
 ```
+
+The embeddings model is optional: without `embed_weights_object` the launcher
+omits the `embed` tool, the harness skips query embedding, and search falls
+back to keywords. Both models decrypt into the same `/models` tmpfs, so size
+`weights_tmpfs_bytes` for the pair (and bump the machine to `-8`/32 GiB if the
+two are tight on `n2d-standard-4` — see docs/DESIGN.md spike 3).
 
 The CVM must run the **production** `confidential-space` family: the
 provider's STABLE condition denies the debug image by design (don't "fix"
@@ -372,8 +384,14 @@ under the supervised launcher, per llama.cpp's own memory accounting:
 | **Total** | **≈ 4.5 GiB** |
 
 On the default `n2d-standard-4` (16 GB) that leaves >10 GiB headroom for the
-EmbeddingGemma instance (issue #11). If memory ever gets tight,
-`LLAMA_EXTRA_ARGS="--ctx-size 8192"` shaves ~0.7 GiB off the KV cache.
+EmbeddingGemma instance (issue #11): the launcher supervises it as a second
+`llama-server` started with `--embeddings` on loopback port 8082 (chat stays on
+8081), and the `embed` tool reaches it in-enclave. EmbeddingGemma (~0.3 GiB
+weights + small buffers) fits comfortably inside that headroom, so the pair runs
+on `n2d-standard-4` without a machine bump — **re-measure on the live two-model
+deploy to confirm before relying on it** (issue #11 acceptance criterion). If
+memory ever gets tight, `LLAMA_EXTRA_ARGS="--ctx-size 8192"` shaves ~0.7 GiB off
+the chat KV cache, and `-8` (32 GiB) is the documented escape hatch.
 
 Cold boot to `/health` ok: **5.6 s locally** (M-series laptop; model load
 dominates). On the CVM the launcher's own number is about the same —

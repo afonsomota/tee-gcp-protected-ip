@@ -27,29 +27,44 @@
 //!         (length) from read (copy) avoids re-entrant host→guest `alloc`
 //!         calls, which wasmtime forbids mid-call.
 //!
-//! # Tool loop (issue #10)
+//! # Tool loop (issues #10, #11)
 //!
-//! The reply JSON is now one of two shapes:
+//! The reply JSON is one of two shapes:
 //!   * `{"reply": "<text>"}`                          — final answer
-//!   * `{"tool_calls": [{"id","name","arguments"}]}`  — run these client-side
+//!   * `{"tool_calls": [{"id","name","arguments"}]}`  — run these tools
 //!
-//! The context JSON the host hands in grows to carry the loop state (the
-//! launcher is stateless, so each turn replays everything):
-//!   * `messages`     — the user/assistant transcript, oldest first
-//!   * `tool_results` — results of the tool calls the harness asked for last
-//!                      turn (empty on the first turn of a user message)
-//!   * `tools`        — the launcher's tool manifest (informational; the
-//!                      launcher re-validates every call we emit against it)
+//! Tool calls run on one of two loci (declared in the launcher manifest):
+//!   * *client* tools (`search_entries`, `attach_metadata`) go back to the
+//!     browser, over the user's local data;
+//!   * *enclave* tools (`embed`, `summarize`, `extract_metadata`) are executed
+//!     in-enclave by the launcher against the models and looped straight back
+//!     to us — the browser never sees them.
 //!
-//! This module's policy is a deliberately simple stand-in for the closed
-//! "secret sauce": on a fresh user turn it retrieves the user's relevant
-//! entries via `search_entries` (the on-demand data-minimization flow — entries
-//! enter the enclave only when this tool pulls them), then on the next turn it
-//! answers grounded in whatever the client returned. A real harness would plan
-//! with the model; the *machinery* (manifest, validation, multi-turn routing)
-//! is what issue #10 builds.
+//! The launcher is stateless, so each turn replays everything in the context:
+//!   * `task`         — `"chat"` (default) or `"enrich"`
+//!   * `messages`     — the user/assistant transcript, oldest first (chat)
+//!   * `entry`        — the journal entry to enrich (enrich)
+//!   * `tool_results` — results of the tool calls we asked for last turn
+//!                      (client- *or* enclave-executed), empty on the first turn
+//!   * `tools`        — the launcher's tool manifest. We read it only to learn
+//!                      which enclave tools are *available* this deployment
+//!                      (e.g. `embed` exists only when an embeddings model is
+//!                      loaded); the launcher re-validates every call we emit.
+//!
+//! This module is a deliberately simple stand-in for the closed orchestration:
+//!   * *chat* — embed the query (enclave) for semantic recall when available,
+//!     then `search_entries` (client) the user's local journal, then answer
+//!     grounded in whatever came back. Entries enter the enclave only via that
+//!     client search (on-demand data minimization).
+//!   * *enrich* — on entry save, run `summarize` + `extract_metadata` (+ `embed`
+//!     when available) in the enclave, then write the result back with
+//!     `attach_metadata` (client). One turn, both loci.
+//!
+//! A real harness would plan with the model; the *machinery* (manifest,
+//! validation, multi-locus routing) is what issues #10/#11 build.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 /// Prompt text lives outside the code, in `harness/prompts/`, so the
 /// orchestration — the company's closed IP — can be edited without touching
@@ -75,20 +90,30 @@ extern "C" {
 
 #[derive(Deserialize)]
 struct Context {
+    /// `"chat"` (default) or `"enrich"`. Absent on legacy chat contexts.
+    #[serde(default = "default_task")]
+    task: String,
     /// The conversation so far, oldest first, validated host-side to contain
     /// only `user`/`assistant` roles (the system prompt is ours, below).
+    #[serde(default)]
     messages: Vec<Message>,
-    /// Results of the tool calls we asked for on the previous turn. Empty on
-    /// the first turn of a user message; populated by the client once it has
-    /// executed our `search_entries`/`attach_metadata` requests.
+    /// The entry to enrich (enrich task only).
+    #[serde(default)]
+    entry: Option<Entry>,
+    /// Results of the tool calls we asked for on the previous turn — client- or
+    /// enclave-executed. Empty on the first turn; populated by the launcher
+    /// (enclave tools) or the client (`search_entries`/`attach_metadata`).
     #[serde(default)]
     tool_results: Vec<ToolResult>,
-    /// The launcher's manifest, handed in for reference. We don't enforce it —
-    /// the launcher does, re-validating every call below — so it's accepted but
-    /// otherwise unused here.
+    /// The launcher's manifest. We read only the advertised tool *names* (to
+    /// learn which enclave tools this deployment offers); the launcher enforces
+    /// the rest, re-validating every call below.
     #[serde(default)]
-    #[allow(dead_code)]
-    tools: serde_json::Value,
+    tools: Value,
+}
+
+fn default_task() -> String {
+    "chat".to_string()
 }
 
 #[derive(Deserialize, Serialize)]
@@ -97,15 +122,27 @@ struct Message {
     content: String,
 }
 
-/// A tool result the client fed back: the call id, the tool name, and the
-/// tool's JSON output (shape is tool-specific — `search_entries` returns
-/// `{ "matches": [...] }`).
+/// The journal entry handed in for enrichment. Title/body are the user's data;
+/// they stay inside the enclave (and this sandbox) for the duration of the call.
+#[derive(Deserialize)]
+struct Entry {
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+}
+
+/// A tool result fed back: the call id, the tool name, and the tool's JSON
+/// output (shape is tool-specific — `search_entries` → `{ "matches": [...] }`,
+/// `embed` → `{ "embedding": [...] }`, `summarize` → `{ "summary": "..." }`,
+/// `extract_metadata` → `{ "emotions", "situations", "lifePhases" }`).
 #[derive(Deserialize)]
 struct ToolResult {
     #[allow(dead_code)]
     id: String,
     name: String,
-    result: serde_json::Value,
+    result: Value,
 }
 
 /// Allocate `len` bytes and hand the raw pointer to the host. The boxed slice
@@ -151,45 +188,73 @@ pub unsafe extern "C" fn run(ctx_ptr: u32, ctx_len: u32) -> u64 {
     (ptr << 32) | len
 }
 
-/// The orchestration (the secret sauce): parse the context and either request
-/// a tool call or, once the client has answered one, build the prompt and ask
-/// the model. `None` on any failure.
+/// The orchestration (the secret sauce): parse the context and route by task.
+/// `None` on any failure.
 fn orchestrate(ctx: &[u8]) -> Option<Vec<u8>> {
     let context: Context = serde_json::from_slice(ctx).ok()?;
-
-    if context.tool_results.is_empty() {
-        // Fresh user turn: retrieve the entries relevant to it before answering.
-        // This is the data-minimization step — the only path that pulls entries
-        // into the enclave, and only the ones the client's search matches.
-        return retrieve(&context.messages);
+    match context.task.as_str() {
+        "enrich" => enrich(&context),
+        _ => chat(&context),
     }
-
-    // The client has executed our tool calls; answer grounded in the results.
-    answer(&context.messages, &context.tool_results)
 }
 
-/// Emit a `search_entries` call seeded from the latest user message. The
-/// launcher re-validates this against its manifest before it reaches the
-/// client.
-fn retrieve(messages: &[Message]) -> Option<Vec<u8>> {
-    let query = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")?
-        .content
-        .clone();
-    // The id must be unique per turn: the client keys tool-activity UI on it,
-    // so reusing a constant would make a later turn's search clobber an earlier
-    // turn's record. `messages.len()` strictly increases each user turn (every
-    // turn appends at least the new user message plus any prior reply) and is
-    // stable across the retrieve/answer legs of one turn, so it gives a stable,
-    // collision-free id without the harness having to carry state.
-    let call = serde_json::json!({
+// ── chat ──────────────────────────────────────────────────────────────────
+
+/// Chat orchestration. Drives the retrieve→answer loop, optionally embedding the
+/// query first (enclave) so the client search can rank by semantic similarity.
+fn chat(context: &Context) -> Option<Vec<u8>> {
+    let results = &context.tool_results;
+
+    // The client has searched: answer grounded in the matched entries.
+    if has_result(results, "search_entries") {
+        return answer(&context.messages, results);
+    }
+
+    // We asked to embed the query last turn (enclave). Now ask the client to
+    // search: carry the embedding for semantic recall when it came back, but if
+    // the embed failed (a result with no `embedding` — the launcher degrades a
+    // down embeddings server to this) fall through to a keyword search instead
+    // of re-embedding forever.
+    if has_result(results, "embed") {
+        let embedding = result_field(results, "embed", "embedding").cloned();
+        return emit_search(&context.messages, embedding);
+    }
+
+    // Fresh user turn. Embed the query first when the deployment offers it;
+    // otherwise go straight to a keyword search (graceful degradation).
+    if tool_available(&context.tools, "embed") {
+        return emit_embed(&context.messages);
+    }
+    emit_search(&context.messages, None)
+}
+
+/// Emit an `embed` call (enclave) seeded from the latest user message.
+fn emit_embed(messages: &[Message]) -> Option<Vec<u8>> {
+    let query = latest_user(messages)?;
+    let call = json!({
+        "id": format!("embed-{}", messages.len()),
+        "name": "embed",
+        "arguments": { "text": query },
+    });
+    serde_json::to_vec(&json!({ "tool_calls": [call] })).ok()
+}
+
+/// Emit a `search_entries` call (client) seeded from the latest user message,
+/// optionally carrying the query embedding so the client can rank by similarity.
+/// The id is keyed on the transcript length so a later turn's search never
+/// clobbers an earlier turn's record (the client keys tool-activity UI on it).
+fn emit_search(messages: &[Message], query_embedding: Option<Value>) -> Option<Vec<u8>> {
+    let query = latest_user(messages)?;
+    let mut arguments = json!({ "query": query, "limit": 5 });
+    if let Some(embedding) = query_embedding {
+        arguments["query_embedding"] = embedding;
+    }
+    let call = json!({
         "id": format!("search-{}", messages.len()),
         "name": "search_entries",
-        "arguments": { "query": query, "limit": 5 },
+        "arguments": arguments,
     });
-    serde_json::to_vec(&serde_json::json!({ "tool_calls": [call] })).ok()
+    serde_json::to_vec(&json!({ "tool_calls": [call] })).ok()
 }
 
 /// Build the prompt — system + retrieved-entry context + the conversation —
@@ -213,13 +278,9 @@ fn answer(messages: &[Message], tool_results: &[ToolResult]) -> Option<Vec<u8>> 
         content: m.content.clone(),
     }));
 
-    let request = serde_json::json!({
-        "messages": prompt,
-        "max_tokens": MAX_TOKENS,
-    });
+    let request = json!({ "messages": prompt, "max_tokens": MAX_TOKENS });
     let reply = call_model(&serde_json::to_vec(&request).ok()?)?;
-
-    serde_json::to_vec(&serde_json::json!({ "reply": reply })).ok()
+    serde_json::to_vec(&json!({ "reply": reply })).ok()
 }
 
 /// Render the `search_entries` matches the client returned into a grounding
@@ -248,6 +309,123 @@ fn format_retrieved(tool_results: &[ToolResult]) -> Option<String> {
         "The user's relevant journal entries (use them to answer; do not invent others):\n{}",
         lines.join("\n")
     ))
+}
+
+// ── enrich ──────────────────────────────────────────────────────────────────
+
+/// Entry-save enrichment. First turn: ask the enclave to summarize, extract
+/// metadata, and (when available) embed the entry. Next turn: fold those
+/// results into one enrichment object and write it back with `attach_metadata`
+/// (client). Final turn: acknowledge once the client confirms the write.
+fn enrich(context: &Context) -> Option<Vec<u8>> {
+    let entry = context.entry.as_ref()?;
+    let results = &context.tool_results;
+
+    // The client has stored the enrichment — we are done.
+    if has_result(results, "attach_metadata") {
+        return serde_json::to_vec(&json!({
+            "reply": "Reflected on your entry and saved the notes locally."
+        }))
+        .ok();
+    }
+
+    let want_embed = tool_available(&context.tools, "embed");
+    if enclave_enrichment_ready(results, want_embed) {
+        // Fold the enclave tool outputs into one enrichment object.
+        let enrichment = assemble_enrichment(results);
+        let call = json!({
+            "id": format!("attach-{}", entry.id),
+            "name": "attach_metadata",
+            "arguments": { "entry_id": entry.id, "enrichment": enrichment },
+        });
+        return serde_json::to_vec(&json!({ "tool_calls": [call] })).ok();
+    }
+
+    // First turn: request the enclave enrichment primitives as one batch.
+    let text = entry_text(entry);
+    let mut calls = vec![
+        json!({ "id": format!("summarize-{}", entry.id), "name": "summarize", "arguments": { "text": text } }),
+        json!({ "id": format!("extract-{}", entry.id), "name": "extract_metadata", "arguments": { "text": text } }),
+    ];
+    if want_embed {
+        calls.push(json!({
+            "id": format!("embed-{}", entry.id),
+            "name": "embed",
+            "arguments": { "text": text },
+        }));
+    }
+    serde_json::to_vec(&json!({ "tool_calls": calls })).ok()
+}
+
+/// Have all the enclave enrichment primitives come back? `summarize` and
+/// `extract_metadata` always; `embed` only when this deployment offers it.
+fn enclave_enrichment_ready(results: &[ToolResult], want_embed: bool) -> bool {
+    has_result(results, "summarize")
+        && has_result(results, "extract_metadata")
+        && (!want_embed || has_result(results, "embed"))
+}
+
+/// Merge the `summarize`/`extract_metadata`/`embed` outputs into the enrichment
+/// object the client stores. Missing fields are simply omitted — the client
+/// sanitizes whatever it receives before persisting it.
+fn assemble_enrichment(results: &[ToolResult]) -> Value {
+    let mut enrichment = serde_json::Map::new();
+    if let Some(summary) = result_field(results, "summarize", "summary") {
+        enrichment.insert("summary".to_string(), summary.clone());
+    }
+    for field in ["emotions", "situations", "lifePhases"] {
+        if let Some(value) = result_field(results, "extract_metadata", field) {
+            enrichment.insert(field.to_string(), value.clone());
+        }
+    }
+    if let Some(embedding) = result_field(results, "embed", "embedding") {
+        enrichment.insert("embedding".to_string(), embedding.clone());
+    }
+    Value::Object(enrichment)
+}
+
+fn entry_text(entry: &Entry) -> String {
+    if entry.title.is_empty() {
+        entry.body.clone()
+    } else {
+        format!("{}\n\n{}", entry.title, entry.body)
+    }
+}
+
+// ── shared helpers ──────────────────────────────────────────────────────────
+
+/// The most recent user message's content.
+fn latest_user(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+}
+
+/// Is a tool with this name advertised in the launcher manifest? Used to learn
+/// which optional enclave tools the deployment offers (e.g. `embed`).
+fn tool_available(tools: &Value, name: &str) -> bool {
+    tools
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .is_some_and(|arr| {
+            arr.iter()
+                .any(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))
+        })
+}
+
+/// Has any result with this tool name come back?
+fn has_result(results: &[ToolResult], name: &str) -> bool {
+    results.iter().any(|r| r.name == name)
+}
+
+/// Pull `result[field]` from the first result with this tool name.
+fn result_field<'a>(results: &'a [ToolResult], name: &str, field: &str) -> Option<&'a Value> {
+    results
+        .iter()
+        .find(|r| r.name == name)
+        .and_then(|r| r.result.get(field))
 }
 
 /// Two-step host call: `llm_generate` returns the reply length (or -1), then

@@ -7,9 +7,9 @@
  * the harness, and returns an HPKE-sealed reply that is either a final answer
  * or a request to run client-side tools.
  *
- * When the enclave asks for tools, we execute them locally (over IndexedDB),
- * seal the results, and send them back for the next harness turn — looping
- * until the harness produces a reply. Only the tool *results* (e.g. the
+ * The tool loop itself lives in `toolLoop.ts` (shared with `/enrich`); this
+ * module is just the chat-specific transport: build the request, seal it, post
+ * it, and unseal the per-turn reply. Only the tool *results* (e.g. the
  * search-matched entries) cross the channel; the rest of the journal never
  * leaves the device.
  *
@@ -17,7 +17,14 @@
  * launcher/src/chat.rs.
  */
 import { type Envelope, b64encode, makeSuite, open, seal } from "./hpke";
-import type { ToolCall, ToolExecutor } from "./tools";
+import {
+  type HarnessTurn,
+  type ToolLoopOptions,
+  type ToolResult,
+  runToolLoop,
+} from "./toolLoop";
+
+export type { ToolActivity, ToolResult } from "./toolLoop";
 
 export const CHAT_REQUEST_INFO = "tee-example/hpke/chat/request/v1";
 export const CHAT_RESPONSE_INFO = "tee-example/hpke/chat/response/v1";
@@ -27,39 +34,9 @@ export interface ChatMessage {
   content: string;
 }
 
-/** A tool result fed back to the enclave for the next harness turn. */
-export interface ToolResult {
-  id: string;
-  name: string;
-  result: unknown;
-}
-
-/** UI-facing record of one tool the enclave asked us to run. */
-export interface ToolActivity {
-  id: string;
-  name: string;
-  status: "running" | "done" | "error";
-  summary: string;
-}
-
-export interface ChatOptions {
-  /** Runs a client-locus tool the enclave requested. Required if the harness
-   *  emits tool calls (it does on every user turn). */
-  executeTool?: ToolExecutor;
-  /** Notified as each tool starts and finishes, for the chat UI. */
-  onActivity?: (activity: ToolActivity) => void;
-  /** Safety bound on harness↔client tool rounds before giving up. */
-  maxToolRounds?: number;
-}
-
-/** The enclave's per-turn reply: a final answer xor a batch of tool calls. */
-interface HarnessTurn {
-  reply?: string;
-  tool_calls?: ToolCall[];
-}
+export type ChatOptions = ToolLoopOptions;
 
 const utf8 = new TextEncoder();
-const DEFAULT_MAX_TOOL_ROUNDS = 4;
 
 /**
  * Build the /chat request plaintext. Field names pin the launcher's wire
@@ -130,64 +107,8 @@ export async function hpkeChat(
   history: ChatMessage[],
   options: ChatOptions = {},
 ): Promise<string> {
-  const maxRounds = options.maxToolRounds ?? DEFAULT_MAX_TOOL_ROUNDS;
-  let toolResults: ToolResult[] | undefined;
-
-  for (let round = 0; round <= maxRounds; round++) {
-    const turn = await sendTurn(apiEndpoint, enclavePublicKey, history, toolResults);
-
-    if (typeof turn.reply === "string") {
-      return turn.reply;
-    }
-
-    const calls = turn.tool_calls;
-    if (calls === undefined || calls.length === 0) {
-      throw new Error("enclave returned neither a reply nor tool calls");
-    }
-    if (options.executeTool === undefined) {
-      throw new Error("the enclave requested a tool, but no tool executor is configured");
-    }
-
-    toolResults = [];
-    for (const call of calls) {
-      options.onActivity?.({
-        id: call.id,
-        name: call.name,
-        status: "running",
-        summary: describePending(call),
-      });
-      try {
-        const outcome = await options.executeTool(call);
-        toolResults.push({ id: call.id, name: call.name, result: outcome.result });
-        options.onActivity?.({
-          id: call.id,
-          name: call.name,
-          status: "done",
-          summary: outcome.summary,
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        options.onActivity?.({
-          id: call.id,
-          name: call.name,
-          status: "error",
-          summary: `Tool ${call.name} failed: ${message}`,
-        });
-        throw err;
-      }
-    }
-  }
-
-  throw new Error(`enclave tool loop exceeded ${maxRounds} rounds`);
-}
-
-function describePending(call: ToolCall): string {
-  if (call.name === "search_entries") {
-    const query = typeof call.arguments.query === "string" ? call.arguments.query : "";
-    return query ? `Searching your entries for “${query}”…` : "Searching your entries…";
-  }
-  if (call.name === "attach_metadata") {
-    return "Saving metadata to your local journal…";
-  }
-  return `Running ${call.name}…`;
+  return runToolLoop(
+    (toolResults) => sendTurn(apiEndpoint, enclavePublicKey, history, toolResults),
+    options,
+  );
 }

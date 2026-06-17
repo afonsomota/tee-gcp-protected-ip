@@ -5,6 +5,7 @@
 mod acme_cache;
 mod artifacts;
 mod chat;
+mod enclave_tools;
 mod gcp;
 mod harness;
 mod hpke_channel;
@@ -42,6 +43,11 @@ pub struct AppState {
     /// `host:port` of the llama-server `/chat` proxies to (see `llama.rs`);
     /// `None` when no model is configured.
     pub inference: Option<String>,
+    /// `host:port` of the second (EmbeddingGemma) llama-server the in-enclave
+    /// `embed` tool reaches (issue #11); `None` when no embeddings model is
+    /// configured — semantic search then degrades to keyword search and the
+    /// manifest omits `embed`.
+    pub embeddings: Option<String>,
     /// The signed, sandboxed wasm harness (issue #8) that owns prompt
     /// orchestration. Filled asynchronously after delivery + signature check;
     /// `/chat` serves 503 until it is ready (see `harness.rs`).
@@ -55,6 +61,7 @@ fn app(state: AppState) -> Router {
         .route("/hpke-key", get(hpke_channel::hpke_key))
         .route("/hpke/echo", post(hpke_channel::hpke_echo))
         .route("/chat", post(chat::chat))
+        .route("/enrich", post(chat::enrich))
         // Attestation and the HPKE channel carry their own trust; the
         // frontend is served from a different origin (GitHub Pages / Vite).
         .layer(tower_http::cors::CorsLayer::permissive())
@@ -75,6 +82,12 @@ async fn main() {
         Some(upstream) => Some(upstream),
         None => llama::init_from_env(dev),
     };
+    // The second (embeddings) instance, configured independently (issue #11).
+    // Absent → semantic search degrades to keyword search.
+    let embeddings = match artifacts::init_embeddings(dev).await {
+        Some(upstream) => Some(upstream),
+        None => llama::init_embeddings_from_env(dev),
+    };
     // The harness rides issue #7's delivery pipeline (signed + encrypted), so
     // it can lag boot; start the (backgrounded) load and hand `/chat` a slot
     // that fills when the verified module is ready.
@@ -84,6 +97,7 @@ async fn main() {
         keys: Arc::new(keys::EnclaveKeys::generate()),
         dev,
         inference,
+        embeddings,
         harness: harness_slot,
     };
     println!(
@@ -233,6 +247,7 @@ mod tests {
             keys: Arc::new(keys::EnclaveKeys::generate()),
             dev,
             inference: None,
+            embeddings: None,
             harness: Arc::new(harness::HarnessSlot::empty()),
         }
     }

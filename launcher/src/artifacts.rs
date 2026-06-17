@@ -51,8 +51,10 @@ const NONCE_PREFIX_SIZE: usize = 7;
 /// make the per-segment buffer arbitrarily large.
 const MAX_CHUNK_SIZE: usize = 64 * 1024 * 1024;
 
-/// Where the decrypted model lands: the Confidential Space `tee-mount` tmpfs.
+/// Where the decrypted chat model lands: the Confidential Space `tee-mount`
+/// tmpfs. The embeddings model (issue #11) lands beside it.
 const DEFAULT_DEST: &str = "/models/model.gguf";
+const DEFAULT_EMBED_DEST: &str = "/models/embed.gguf";
 
 /// Delivery retry budget. KMS IAM propagation can run several minutes past
 /// infra's 120s `time_sleep` — especially after a digest rotation, where the
@@ -95,6 +97,12 @@ const HARNESS: ArtifactNames = ArtifactNames {
     env_prefix: "HARNESS",
     attr_prefix: "harness",
 };
+/// The embeddings model (issue #11) rides the same envelope pipeline as the
+/// chat weights, under its own names so the two are configured independently.
+const EMBED_WEIGHTS: ArtifactNames = ArtifactNames {
+    env_prefix: "EMBED_WEIGHTS",
+    attr_prefix: "embed-weights",
+};
 
 struct Config {
     bucket: String,
@@ -117,9 +125,8 @@ impl Config {
         if let Some(object) = env(names.env("OBJECT")) {
             let require = |suffix: &str| {
                 let name = names.env(suffix);
-                env(name.clone()).ok_or_else(|| {
-                    format!("{} is set but {name} is not", names.env("OBJECT"))
-                })
+                env(name.clone())
+                    .ok_or_else(|| format!("{} is set but {name} is not", names.env("OBJECT")))
             };
             return Ok(Some(Config {
                 bucket: require("BUCKET")?,
@@ -169,11 +176,49 @@ pub async fn init(dev: bool) -> Option<String> {
     );
     let upstream = crate::llama::planned_upstream();
     tokio::spawn(async move {
-        match deliver_with_retries(&WEIGHTS, || deliver(&config)).await {
+        match deliver_with_retries(&WEIGHTS, || {
+            deliver(&config, DEFAULT_DEST, "WEIGHTS_DEST", "weights")
+        })
+        .await
+        {
             Some(path) => {
                 crate::llama::start(path);
             }
             None => eprintln!("weights: giving up; /chat will keep failing"),
+        }
+    });
+    Some(upstream)
+}
+
+/// If embeddings-model delivery is configured, spawn the fetch→decrypt→serve
+/// pipeline for the second (EmbeddingGemma) instance and return the upstream
+/// the launcher's `embed` tool should (eventually) reach. `None` = not
+/// configured; the caller falls back to `llama::init_embeddings_from_env`, and
+/// failing that, semantic search degrades to keyword search.
+pub async fn init_embeddings(dev: bool) -> Option<String> {
+    let config = resolve_with_retries(dev, &EMBED_WEIGHTS).await?;
+    println!(
+        "embed-weights: delivering gs://{}/{} (KMS {})",
+        config.bucket, config.object, config.kms_key
+    );
+    let upstream = crate::llama::planned_embed_upstream();
+    tokio::spawn(async move {
+        match deliver_with_retries(&EMBED_WEIGHTS, || {
+            deliver(
+                &config,
+                DEFAULT_EMBED_DEST,
+                "EMBED_WEIGHTS_DEST",
+                "embed-weights",
+            )
+        })
+        .await
+        {
+            Some(path) => {
+                crate::llama::start_embeddings(path);
+            }
+            None => {
+                eprintln!("embed-weights: giving up; semantic search will fall back to keywords")
+            }
         }
     });
     Some(upstream)
@@ -187,10 +232,7 @@ pub async fn init(dev: bool) -> Option<String> {
 /// report exhaustion. `None` = every attempt failed (each logged here); the VM
 /// stays up and `/chat` keeps serving errors until — for a transient cause — a
 /// later boot or retry lands.
-async fn deliver_with_retries<T, Fut>(
-    names: &ArtifactNames,
-    deliver: impl Fn() -> Fut,
-) -> Option<T>
+async fn deliver_with_retries<T, Fut>(names: &ArtifactNames, deliver: impl Fn() -> Fut) -> Option<T>
 where
     Fut: std::future::Future<Output = Result<T, String>>,
 {
@@ -315,9 +357,12 @@ async fn fetch_manifest_and_key(
         .map_err(|e| format!("manifest wrapped_dek is not base64: {e}"))?;
     // Only an attested workload running the expected image digest can make
     // this KMS call succeed.
-    let dek =
-        crate::gcp::kms_decrypt(&config.kms_key, config.wip_audience.as_deref(), &wrapped_dek)
-            .await?;
+    let dek = crate::gcp::kms_decrypt(
+        &config.kms_key,
+        config.wip_audience.as_deref(),
+        &wrapped_dek,
+    )
+    .await?;
     let nonce_prefix = B64
         .decode(&manifest.nonce_prefix)
         .map_err(|e| format!("manifest nonce_prefix is not base64: {e}"))?;
@@ -354,8 +399,15 @@ async fn fetch_harness(config: &Config) -> Result<(Vec<u8>, Vec<u8>), String> {
     let signature = manifest.required_signature()?;
 
     let mut wasm = Vec::new();
-    let (size, sha256) =
-        stream_into(&gcs_token, config, &manifest, &dek, &nonce_prefix, &mut wasm).await?;
+    let (size, sha256) = stream_into(
+        &gcs_token,
+        config,
+        &manifest,
+        &dek,
+        &nonce_prefix,
+        &mut wasm,
+    )
+    .await?;
     verify_against_manifest(&manifest, size, sha256, "harness")?;
     println!("harness: decrypted {size} bytes (sha256 verified; signature checked on load)");
     Ok((wasm, signature))
@@ -363,10 +415,17 @@ async fn fetch_harness(config: &Config) -> Result<(Vec<u8>, Vec<u8>), String> {
 
 /// Fetch the manifest, unwrap the DEK as the attested principal, stream the
 /// ciphertext through the decryptor onto tmpfs, verify, and return the path.
-async fn deliver(config: &Config) -> Result<String, String> {
+/// `default_dest`/`dest_env`/`label` flavor it per model (chat weights vs. the
+/// embeddings model) — both ride the identical envelope + verification path.
+async fn deliver(
+    config: &Config,
+    default_dest: &str,
+    dest_env: &str,
+    label: &str,
+) -> Result<String, String> {
     let (gcs_token, manifest, dek, nonce_prefix) = fetch_manifest_and_key(config).await?;
 
-    let dest = std::env::var("WEIGHTS_DEST").unwrap_or_else(|_| DEFAULT_DEST.to_string());
+    let dest = std::env::var(dest_env).unwrap_or_else(|_| default_dest.to_string());
     // Any failure must remove the partial plaintext: the tmpfs is guest RAM,
     // and a stranded multi-GB file would stay pinned for the VM's lifetime.
     let result = stream_decrypt_to(&gcs_token, config, &manifest, &dek, &nonce_prefix, &dest).await;
@@ -378,11 +437,11 @@ async fn deliver(config: &Config) -> Result<String, String> {
         }
     };
 
-    if let Err(e) = verify_against_manifest(&manifest, size, sha256, "weights") {
+    if let Err(e) = verify_against_manifest(&manifest, size, sha256, label) {
         std::fs::remove_file(&dest).ok();
         return Err(e);
     }
-    println!("weights: decrypted {size} bytes to {dest} (sha256 verified)");
+    println!("{label}: decrypted {size} bytes to {dest} (sha256 verified)");
     Ok(dest)
 }
 
