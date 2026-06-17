@@ -9,6 +9,13 @@
 #     [--build-arg EMBED_MODEL_URL=https://...embed.gguf] -t <tag> launcher/
 # EMBED_MODEL_URL bakes the EmbeddingGemma instance (issue #11); without it
 # semantic search degrades to keyword search.
+# BAKE AT MOST ONE MODEL (issue #52). Baking both MODEL_URL and
+# EMBED_MODEL_URL overflows the default Confidential Space boot disk: the CVM
+# fails to extract the second GGUF layer (`no space left on device`), the
+# workload never starts, and the VM self-terminates ~8 min after boot with
+# evidence only in Cloud Logging. There is no boot-disk-size knob — two-model
+# deployments must use encrypted delivery into the /models tmpfs (issue #11);
+# see infra/README.md "Encrypted weights" and its silent-termination notes.
 # Rust 1.94+: wasmtime 45 (embedded for the issue #8 harness sandbox) needs 1.93.
 FROM --platform=$BUILDPLATFORM rust:1.94-alpine AS build
 RUN apk add --no-cache musl-dev
@@ -22,9 +29,11 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs \
 COPY src ./src
 RUN touch src/main.rs && cargo build --release --target x86_64-unknown-linux-musl
 
-# Optionally bake chat-model + embeddings-model weights into the image (issue
+# Optionally bake chat-model OR embeddings-model weights into the image (issue
 # 006 allows plaintext weights; attestation-gated encrypted delivery is issue
 # 007). The embeddings model (issue #11) is independent of the chat model.
+# Bake at most one of the two — baking both overflows the default boot disk
+# (issue #52, see the header comment above).
 FROM alpine:3.22 AS weights
 ARG MODEL_URL=""
 ARG EMBED_MODEL_URL=""

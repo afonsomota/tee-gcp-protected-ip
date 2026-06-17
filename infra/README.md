@@ -157,6 +157,14 @@ gcloud auth configure-docker europe-west4-docker.pkg.dev
 # WITHOUT weights (spike 002): production /chat is activated by encrypted
 # weights delivery instead — see "Encrypted weights" below. Without either,
 # the image still works but /chat returns 503.
+# The bake path supports a SINGLE model only. Baking both MODEL_URL and
+# EMBED_MODEL_URL produces an image whose extracted layers overflow the
+# default Confidential Space boot disk: the CVM fails to write the second
+# GGUF (`no space left on device`), the workload never starts, and the VM
+# self-terminates ~8 minutes after boot with evidence only in Cloud Logging
+# (see "silent self-termination modes" below). Two-model deployments must
+# use encrypted delivery into the /models tmpfs (issue #11) — bake at most
+# one model here.
 docker buildx build --platform linux/amd64 \
   --build-arg MODEL_URL="https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf" \
   -t europe-west4-docker.pkg.dev/YOUR_PROJECT_ID/tee-example/launcher:latest \
@@ -545,6 +553,15 @@ Gotchas hit on the way, now fixed in-tree:
   ~0.1 s after the container launches, the IAM race kills it ~3 minutes after
   boot — and a plain `gcloud compute instances start` of the same VM later
   comes up clean once IAM has settled.
+- Baking **both** models into the image (`MODEL_URL` *and* `EMBED_MODEL_URL`,
+  issue #52) overflows the default Confidential Space boot disk. The CVM can't
+  extract the second layer (`write /models/...gguf: no space left on device`
+  in Cloud Logging), the workload never starts, and the VM self-terminates
+  ~8 minutes after boot. The disk-overflow signature sits between the two
+  modes above by timing (~8 min vs ~0.1 s / ~3 min) and is distinguished by
+  the `no space left on device` log line. There is no boot-disk-size knob —
+  the bake path is single-model by design; deliver the second model encrypted
+  into the `/models` tmpfs instead (see "Encrypted weights" above).
 - `eat_nonce` in real tokens also carries the issue-003 `hpke:`/`tls:`
   key-binding entries; the verifier checks membership of its fresh nonce.
 
