@@ -490,7 +490,10 @@ make dev-list                                 # what's (potentially) still up
 
 `dev-deploy` derives a deployment suffix from the branch name
 (`scripts/dev-slug.sh` → `dev-<slug>`, sanitized and truncated so the
-service-account `account_id` stays within GCP's 30-char limit), buildx-pushes
+service-account `account_id` stays within GCP's 30-char limit **and** the
+attestation token's `sub` stays within the STS `google.subject` 127-byte limit
+— the latter bound depends on the project id and zone, so the script is fed
+`PROJECT_ID`/`ZONE` (issue #49)), buildx-pushes
 the launcher image tagged `dev-<slug>` (non-reproducible digest — dev only;
 releases still come from `make image`), and applies the main root with
 `-var deployment_suffix=dev-<slug>` in a **Terraform workspace** of the same

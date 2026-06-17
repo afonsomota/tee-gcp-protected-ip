@@ -6,11 +6,16 @@
 # Variables:
 #   PROJECT_ID    GCP project (required for push/deploy/destroy/dev-*)
 #   REGION        Artifact Registry / deploy region   (default europe-west4)
+#   ZONE          CVM zone (must match infra's default) (default europe-west4-a)
 #   REPOSITORY    Artifact Registry repository id     (default tee-example)
 #   TAG           image tag for push                  (default release)
 #   IMAGE_DIGEST  digest to deploy/verify (default: dist/image-digest.txt)
 
 REGION       ?= europe-west4
+# Single source of truth for the dev CVM zone: fed to both dev-slug.sh (which
+# budgets the attestation `sub` length against it, issue #49) and terraform, so
+# the two can't drift. Must match infra/variables.tf's zone default.
+ZONE         ?= europe-west4-a
 REPOSITORY   ?= tee-example
 TAG          ?= release
 IMAGE_DIGEST ?= $(shell cat dist/image-digest.txt 2>/dev/null)
@@ -100,7 +105,7 @@ destroy: require-project require-digest
 # buildx path — non-reproducible digest, dev only. The CVM gets an ephemeral
 # external IP (printed at the end); prod keeps the static one.
 dev-deploy: require-project
-	@suffix=$$(scripts/dev-slug.sh); \
+	@suffix=$$(PROJECT_ID=$(PROJECT_ID) ZONE=$(ZONE) scripts/dev-slug.sh); \
 	image=$(IMAGE_REPO):$$suffix; \
 	echo "==> dev deployment $$suffix"; \
 	docker buildx build --platform linux/amd64 -t $$image --push launcher/; \
@@ -108,7 +113,7 @@ dev-deploy: require-project
 	terraform -chdir=infra init -input=false \
 	  -backend-config="bucket=$(PROJECT_ID)-tfstate" -backend-config="prefix=cvm"; \
 	terraform -chdir=infra workspace select -or-create $$suffix; \
-	terraform -chdir=infra apply -var project_id=$(PROJECT_ID) -var image_digest=$$digest -var deployment_suffix=$$suffix \
+	terraform -chdir=infra apply -var project_id=$(PROJECT_ID) -var zone=$(ZONE) -var image_digest=$$digest -var deployment_suffix=$$suffix \
 	  || { terraform -chdir=infra workspace select default; exit 1; }; \
 	ip=$$(terraform -chdir=infra output -raw external_ip); \
 	terraform -chdir=infra workspace select default; \
@@ -118,10 +123,10 @@ dev-deploy: require-project
 
 ## dev-destroy: tear down this branch's dev deployment only
 dev-destroy: require-project
-	@suffix=$$(scripts/dev-slug.sh); \
+	@suffix=$$(PROJECT_ID=$(PROJECT_ID) ZONE=$(ZONE) scripts/dev-slug.sh); \
 	terraform -chdir=infra workspace select $$suffix \
 	  || { echo "no workspace '$$suffix' — nothing deployed for this branch?"; exit 1; }; \
-	terraform -chdir=infra destroy -var project_id=$(PROJECT_ID) -var deployment_suffix=$$suffix \
+	terraform -chdir=infra destroy -var project_id=$(PROJECT_ID) -var zone=$(ZONE) -var deployment_suffix=$$suffix \
 	  || { terraform -chdir=infra workspace select default; exit 1; }; \
 	terraform -chdir=infra workspace select default; \
 	terraform -chdir=infra workspace delete $$suffix
