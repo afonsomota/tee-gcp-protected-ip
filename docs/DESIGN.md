@@ -96,7 +96,10 @@ falsely (platform trust); model-output IP leakage (distillation).
    the Confidential Space token request (or bind a hash of a combined
    structure).
 3. **Memory fit**: Gemma 4 E2B (Q4) + EmbeddingGemma + launcher on
-   `n2d-standard-4` (16 GB); bump to `-8` if tight.
+   `n2d-standard-4` (16 GB); bump to `-8` if tight. The chat model measures
+   ≈4.5 GiB (issue #6), leaving >10 GiB for the ~0.3 GiB EmbeddingGemma
+   instance the launcher now supervises (issue #11). The two-model headroom
+   still needs a live re-measurement (`infra/README.md` → "Inference footprint").
 4. **ACME at boot**: implemented in issue 004 (`launcher/src/tls.rs`):
    every boot orders a fresh certificate, and until one is deployed TLS
    handshakes simply fail — no plaintext window. The restart story is rate

@@ -54,6 +54,50 @@ pub async fn chat_completion(upstream: &str, body: String) -> Result<String, ()>
         .ok_or(())
 }
 
+/// One embedding against a loopback llama-server started with `--embeddings`
+/// (the EmbeddingGemma instance — see `llama.rs`). `text` is the user content
+/// to embed; it is sent verbatim as the OpenAI-style `input`. Returns the raw
+/// embedding vector.
+///
+/// Same no-leak rule as `chat_completion`: on any failure we log status/length
+/// only (never the body or any decrypted content) and return `Err(())`.
+pub async fn embeddings(upstream: &str, text: String) -> Result<Vec<f64>, ()> {
+    let body = serde_json::json!({ "input": text }).to_string();
+    let (status, response) = match tokio::time::timeout(
+        CHAT_TIMEOUT,
+        request(upstream, Method::POST, "/v1/embeddings", Some(body)),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            eprintln!("upstream/embeddings: upstream unreachable: {e}");
+            return Err(());
+        }
+        Err(_) => {
+            eprintln!("upstream/embeddings: embedding timed out after {CHAT_TIMEOUT:?}");
+            return Err(());
+        }
+    };
+    if !status.is_success() {
+        eprintln!(
+            "upstream/embeddings: upstream returned {status} ({}-byte body withheld)",
+            response.len()
+        );
+        return Err(());
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&response).map_err(|_| ())?;
+    parsed["data"][0]["embedding"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(serde_json::Value::as_f64)
+                .collect::<Vec<f64>>()
+        })
+        .filter(|v| !v.is_empty())
+        .ok_or(())
+}
+
 /// One-shot request to `http://{authority}{path}`. A `Some` body is sent as
 /// `application/json`. Returns the status and raw response body.
 pub async fn request(

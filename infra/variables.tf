@@ -84,11 +84,29 @@ variable "harness_object" {
   default     = null
 }
 
+variable "embed_weights_object" {
+  description = <<-EOT
+    GCS object name of the encrypted embeddings-model manifest inside the
+    artifacts bucket (e.g. "weights/embed.gguf.manifest.json"), as printed by
+    scripts/provision-weights.py. The embeddings model (EmbeddingGemma, issue
+    #11) rides the same KMS-gated pipeline as the chat weights — shared bucket,
+    KMS key, and workload-identity audience — and decrypts into the same /models
+    tmpfs, so it needs no separate decrypt grant or mount.
+    Requires weights_object to be set (the chat weights provide the /models
+    mount). null or "" disables the embeddings model: semantic search degrades
+    to keyword search and the launcher omits the `embed` tool from its manifest.
+  EOT
+  type        = string
+  default     = null
+}
+
 variable "weights_tmpfs_bytes" {
   description = <<-EOT
     Size of the in-memory tmpfs Confidential Space mounts at /models for the
-    decrypted weights. Must fit the plaintext model; counts against guest RAM
-    (n2d-standard-4 has 16 GiB).
+    decrypted weights. Must fit the plaintext model(s) — both the chat model and,
+    when embed_weights_object is set, the embeddings model — since both decrypt
+    into /models. Counts against guest RAM (n2d-standard-4 has 16 GiB; bump to
+    -8 / 32 GiB if two models are tight, per docs/DESIGN.md spike 3).
   EOT
   type        = number
   default     = 8589934592 # 8 GiB

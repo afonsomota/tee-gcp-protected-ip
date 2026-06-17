@@ -97,6 +97,20 @@ locals {
     tee-mount = "type=tmpfs,source=tmpfs,destination=/models,size=${var.weights_tmpfs_bytes}"
   } : {}
 
+  # ---- Embeddings-model delivery (issue #11) --------------------------------
+  # The second (EmbeddingGemma) model rides the same envelope pipeline and KMS
+  # key as the chat weights, under its own `embed-weights-*` attribute names so
+  # the two are configured independently. It decrypts into the same /models
+  # tmpfs the chat weights mount provides (so this block sets no tee-mount), and
+  # reuses the shared decrypt grant — no extra IAM.
+  embed_weights_enabled = var.embed_weights_object != null && var.embed_weights_object != ""
+  embed_weights_metadata = local.embed_weights_enabled ? {
+    embed-weights-bucket       = local.artifacts_bucket
+    embed-weights-object       = var.embed_weights_object
+    embed-weights-kms-key      = local.artifact_kms_key
+    embed-weights-wip-audience = local.wip_audience
+  } : {}
+
   # ---- Signed, encrypted harness delivery (issue #8) ------------------------
   # The wasm harness rides the *same* envelope pipeline and the same KMS key as
   # the weights, so it reuses local.artifact_kms_key / local.wip_audience and
@@ -110,10 +124,10 @@ locals {
     harness-wip-audience = local.wip_audience
   } : {}
 
-  # Both artifacts share the bucket-read and KMS-decrypt grants, so those exist
-  # if *either* is delivered. With weights enabled (the usual case) this is
+  # All artifacts share the bucket-read and KMS-decrypt grants, so those exist
+  # if *any* is delivered. With weights enabled (the usual case) this is
   # unchanged, so prod plans zero-diff.
-  artifact_delivery_enabled = local.weights_enabled || local.harness_enabled
+  artifact_delivery_enabled = local.weights_enabled || local.embed_weights_enabled || local.harness_enabled
 
   # ---- Scale-from-zero (issue #45) ------------------------------------------
   # Prod only: a dev deployment takes an ephemeral IP that a stop would
@@ -414,6 +428,7 @@ resource "google_compute_instance" "cvm" {
     },
     local.tls_metadata,
     local.weights_metadata,
+    local.embed_weights_metadata,
     local.harness_metadata,
     local.controller_metadata,
   )
