@@ -9,6 +9,7 @@ mod enclave_tools;
 mod gcp;
 mod harness;
 mod hpke_channel;
+mod idle;
 mod keys;
 mod llama;
 #[cfg(test)]
@@ -52,6 +53,9 @@ pub struct AppState {
     /// orchestration. Filled asynchronously after delivery + signature check;
     /// `/chat` serves 503 until it is ready (see `harness.rs`).
     pub harness: Arc<harness::HarnessSlot>,
+    /// Scale-from-zero idle clock (issue #45): unix seconds of the last handled
+    /// request, bumped by [`track_activity`] and read by the idle timer.
+    pub activity: idle::Activity,
 }
 
 fn app(state: AppState) -> Router {
@@ -62,10 +66,26 @@ fn app(state: AppState) -> Router {
         .route("/hpke/echo", post(hpke_channel::hpke_echo))
         .route("/chat", post(chat::chat))
         .route("/enrich", post(chat::enrich))
+        // Every handled request resets the idle clock (issue #45) so the VM
+        // stays warm while in use; runs before CORS so even a preflight counts.
+        .layer(axum::middleware::from_fn_with_state(
+            state.activity.clone(),
+            track_activity,
+        ))
         // Attestation and the HPKE channel carry their own trust; the
         // frontend is served from a different origin (GitHub Pages / Vite).
         .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
+}
+
+/// Middleware: stamp the idle clock on every request, then proceed.
+async fn track_activity(
+    State(activity): State<idle::Activity>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    idle::touch(&activity);
+    next.run(request).await
 }
 
 #[tokio::main]
@@ -93,12 +113,14 @@ async fn main() {
     // that fills when the verified module is ready.
     let harness_slot = Arc::new(harness::HarnessSlot::empty());
     harness::init(dev, harness_slot.clone());
+    let activity = idle::new_activity();
     let state = AppState {
         keys: Arc::new(keys::EnclaveKeys::generate()),
         dev,
         inference,
         embeddings,
         harness: harness_slot,
+        activity: activity.clone(),
     };
     println!(
         "enclave key bindings: {} {}",
@@ -109,6 +131,14 @@ async fn main() {
         println!("DEV MODE: /attestation serves an UNSIGNED, UNVERIFIED token");
         if std::env::var("TLS_DOMAIN").is_ok_and(|d| !d.is_empty()) {
             println!("DEV MODE: ignoring TLS_DOMAIN, serving plain HTTP");
+        }
+    }
+    // Scale-from-zero idle timer (issue #45): outside dev mode, if a
+    // `controller-url` is configured, arm a timer that pokes the controller to
+    // stop the VM once it goes idle. No controller configured → stays up.
+    if !dev {
+        if let Some(idle_config) = idle::IdleConfig::resolve().await {
+            idle::spawn(idle_config, activity);
         }
     }
     // TLS (issue 004): enabled outside dev mode by the `tls-domain` instance
@@ -249,6 +279,7 @@ mod tests {
             inference: None,
             embeddings: None,
             harness: Arc::new(harness::HarnessSlot::empty()),
+            activity: idle::new_activity(),
         }
     }
 

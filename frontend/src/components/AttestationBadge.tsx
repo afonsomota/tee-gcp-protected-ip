@@ -26,11 +26,17 @@ function failureLabel(code: string): string {
 }
 
 export function AttestationBadge({ status, onRetry }: Props) {
-  if (status.kind === "idle" || status.kind === "verifying") {
+  if (status.kind === "idle" || status.kind === "verifying" || status.kind === "warming") {
+    const label =
+      status.kind === "warming"
+        ? "Enclave starting…"
+        : status.kind === "verifying"
+          ? "Verifying enclave…"
+          : "Connecting…";
     return (
       <div className="attest-badge attest-badge--pending">
         <span className="attest-badge__dot" />
-        {status.kind === "verifying" ? "Verifying enclave…" : "Connecting…"}
+        {label}
       </div>
     );
   }

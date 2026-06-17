@@ -76,6 +76,13 @@ resource "google_project_service" "apis" {
     # stores the ciphertext blobs.
     "cloudkms.googleapis.com",
     "storage.googleapis.com",
+    # Scale-from-zero controller (issue #45): a gen2 Cloud Function (built by
+    # Cloud Build, served on Cloud Run) that stops/starts the CVM, querying
+    # Cloud Logging for the weekly cert-issuance count.
+    "cloudfunctions.googleapis.com",
+    "cloudbuild.googleapis.com",
+    "run.googleapis.com",
+    "logging.googleapis.com",
   ])
   service            = each.value
   disable_on_destroy = false

@@ -40,6 +40,7 @@ read by [`src/lib/config.ts`](src/lib/config.ts):
 | --- | --- | --- |
 | `VITE_API_ENDPOINT` | Base URL of the enclave API | `http://localhost:8080` (local launcher) |
 | `VITE_EXPECTED_IMAGE_DIGEST` | Enclave container image digest (`sha256:...`) the attestation badge must match | `""` — no pinned digest; the badge cannot verify |
+| `VITE_CONTROLLER_ENDPOINT` | Base URL of the scale-from-zero controller (issue #45). When the API is unreachable the app POSTs `/wake` here, shows "Enclave starting…", and polls attestation until the woken enclave verifies. From `terraform -chdir=infra output -raw controller_url`. | `""` — no controller; the app shows "unreachable" without trying to wake anything |
 
 For local development you can put these in `.env.local` (see
 [`.env.example`](.env.example)) instead of prefixing every command.

@@ -12,7 +12,8 @@ Work is tracked in `issues/` (local markdown issue tracker). `issues/README.md` 
 
 - `launcher/` — Rust. The open, audited TCB that runs inside the enclave: axum server with `/echo`, `/attestation` (Confidential Space token via `/run/container_launcher/teeserver.sock`), the HPKE channel (`/hpke-key`, `/hpke/echo`), and the model endpoints `/chat` and `/enrich`. Keys are generated at boot and bound into the attestation token via `eat_nonce` (`hpke:`/`tls:` prefixed hashes). It supervises one or two `llama-server` instances (chat on 8081; EmbeddingGemma on 8082 when configured), gates a tool manifest (`tools.rs`), runs enclave-locus tools in-enclave (`enclave_tools.rs`: `embed`/`summarize`/`extract_metadata`), and drives the harness tool loop (`chat.rs`).
 - `frontend/` — React + Vite + TypeScript SPA (pnpm). Local-first: entries encrypted client-side (passphrase → Argon2id master key), stored in IndexedDB. Verifies the enclave attestation in the browser (`src/attest/`), HPKE-encrypts payloads. No server-side accounts or data at rest.
-- `infra/` — Terraform, two roots: `infra/bootstrap/` (APIs + Artifact Registry, apply once, never destroy) and `infra/` (service account, firewall, CVM — apply/destroy per deployment). See `infra/README.md` for the full live-run command sequence.
+- `infra/` — Terraform, two roots: `infra/bootstrap/` (APIs + Artifact Registry, apply once, never destroy) and `infra/` (service account, firewall, CVM, scale-from-zero controller — apply/destroy per deployment). See `infra/README.md` for the full live-run command sequence.
+- `controller/` — Python (Cloud Function, gen2). The untrusted, always-on scale-from-zero front door (issue #45): `/wake` starts the stopped CVM on browser demand; `/idle` stops it after the launcher's idle timeout, gated on a weekly cert-issuance budget so a restart never breaches the Let's Encrypt prod limit. Outside the TCB — the frontend re-attests on every reconnect.
 - `scripts/verify-attestation.py` — standalone verifier: fresh nonce → fetch token → check Google JWKS signature, issuer, audience, `eat_nonce`, image digest.
 - `.github/workflows/deploy-frontend.yml` — frontend CI → GitHub Pages on pushes to `main` touching `frontend/**`.
 
@@ -44,6 +45,12 @@ Config is build-time Vite env vars (`VITE_API_ENDPOINT`, `VITE_EXPECTED_IMAGE_DI
 
 ```sh
 uv run --with 'PyJWT[crypto]' --with pytest --with requests pytest scripts/
+```
+
+### Controller tests (run from repo root)
+
+```sh
+uv run --with functions-framework --with pytest pytest controller/
 ```
 
 ### Deploy (requires GCP auth, costs money)

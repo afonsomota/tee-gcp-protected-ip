@@ -165,3 +165,51 @@ variable "acme_directory" {
     error_message = "acme_directory must be letsencrypt, letsencrypt-staging, or an https:// directory URL."
   }
 }
+
+# ---- Scale-from-zero (issue #45) -------------------------------------------
+
+variable "scale_to_zero" {
+  description = <<-EOT
+    Deploy the always-on controller (Cloud Function) that stops the CVM when it
+    goes idle and starts it on demand, so a stopped VM costs no compute. Prod
+    only: a dev deployment takes an ephemeral IP, which a stop would discard, so
+    the controller is never wired for dev regardless of this flag. Set false to
+    keep prod always-on (a continuous demo).
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "idle_timeout_minutes" {
+  description = <<-EOT
+    Minutes with no inbound request after which the launcher pokes the
+    controller to stop the idle CVM. Delivered to the VM as instance metadata
+    (idle-timeout-minutes), read at boot by launcher/src/idle.rs. Takes effect
+    on the next start.
+  EOT
+  type        = number
+  default     = 45
+
+  validation {
+    condition     = var.idle_timeout_minutes > 0
+    error_message = "idle_timeout_minutes must be positive."
+  }
+}
+
+variable "max_weekly_boots" {
+  description = <<-EOT
+    Cap on cold boots (≈ Let's Encrypt cert issuances) the controller will allow
+    per rolling 7 days. At or above this the controller leaves the idle VM
+    running rather than stopping it, so a restart can never breach the
+    Let's Encrypt prod limit (5 certs / 7 days) and lock out TLS — the limit
+    becomes a cost knob. Keep < 5 for headroom; higher only makes sense on
+    Let's Encrypt staging. Delivered to the controller as env config.
+  EOT
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.max_weekly_boots > 0
+    error_message = "max_weekly_boots must be positive."
+  }
+}

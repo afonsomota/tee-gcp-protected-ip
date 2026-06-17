@@ -104,6 +104,13 @@ impl rustls_acme::CertCache for InMemoryCache {
         // Rebind first: the freshly ordered cert is already serving.
         self.keys.set_tls_spki(spki_from_cert_pem(cert)?);
         self.store(&cache_name("cert", domains, directory_url), cert);
+        // Ledger line for the scale-from-zero controller (issue #45): with
+        // tee-container-log-redirect this reaches Cloud Logging, where the
+        // controller counts "tls certificate issued" entries over the trailing
+        // 7 days to keep idle-stops inside the Let's Encrypt weekly cert limit.
+        // Cache is empty every boot, so store_cert fires exactly once per boot —
+        // one issuance per cold start, which is what the budget counts.
+        println!("tls certificate issued domain={}", domains.join(","));
         Ok(())
     }
 }

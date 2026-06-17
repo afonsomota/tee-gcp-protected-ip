@@ -3,3 +3,5 @@ terraform.tfstate
 terraform.tfstate.backup
 terraform.tfstate.d/
 *.tfvars
+# Controller source zip produced by the archive_file data source (issue #45).
+.controller.zip

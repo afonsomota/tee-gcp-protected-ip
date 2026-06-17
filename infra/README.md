@@ -378,6 +378,57 @@ Notes:
   once on mismatch to ride out a renewal rebind). Manual cross-check:
   `openssl s_client -connect api.YOUR_DOMAIN:443 | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | sha256sum`.
 
+## Scale from zero (issue #45)
+
+By default (prod, `scale_to_zero = true`) the main root also deploys a small
+always-on **controller** (a gen2 Cloud Function, packaged from `controller/`)
+that lets the CVM stay **stopped** — no compute cost — until traffic arrives:
+
+- The frontend, on finding the API unreachable, POSTs the controller's `/wake`;
+  it `instances.start`s the stopped VM and returns 202. The browser shows
+  "Enclave starting…" and polls attestation until the freshly booted enclave
+  verifies (new keys, new Google-signed token — trust is re-established from
+  scratch, so the controller is never trusted).
+- The launcher, after `idle_timeout_minutes` with no request, POSTs `/idle`.
+  The controller counts `tls certificate issued` log lines over the trailing
+  7 days and, only if that is below `max_weekly_boots`, `instances.stop`s the
+  VM. At or above the cap it leaves it running — a stop would force a fresh
+  Let's Encrypt cert on the next boot, and refusing keeps issuance inside the
+  prod limit (5 / 7 days). The rate limit is a **cost knob**, never a TLS wall.
+
+A stopped instance keeps the bootstrap **static IP** (small idle charge) and
+restarts on the same address, so DNS never goes stale. The controller holds a
+least-privilege custom role (`compute.instances.get`/`.start`/`.stop`) plus
+`roles/logging.viewer` — not broad instanceAdmin.
+
+Two knobs, both Terraform variables with defaults (change a tfvar and re-apply):
+
+| Variable | Default | Consumed by |
+|---|---|---|
+| `idle_timeout_minutes` | `45` | launcher idle timer (delivered as `idle-timeout-minutes` instance metadata) |
+| `max_weekly_boots` | `4` | controller budget check (function env). Keep `< 5`. |
+
+Wire the controller URL into the frontend so it can wake the enclave:
+
+```sh
+terraform -chdir=infra output -raw controller_url
+# → set as the VITE_CONTROLLER_ENDPOINT repo variable / .env.local
+```
+
+Set `-var scale_to_zero=false` to keep prod always-on (a continuous demo).
+Scale-from-zero is **prod-only**: dev deployments take an ephemeral IP that a
+stop would discard, so the controller is never wired for them.
+
+> **Note:** the controller needs the `cloudfunctions`, `cloudbuild`, `run`, and
+> `logging` APIs. They were added to `infra/bootstrap/`, so on an existing
+> project re-apply the bootstrap root once before the first scale-from-zero
+> deploy: `terraform -chdir=infra/bootstrap apply -var project_id=…`.
+
+> **Validate restartability first (HITL, debug image).** Confirm
+> `instances.stop` → `instances.start` yields a healthy, freshly-attesting
+> enclave on the same IP. If stop/start is not clean for a CS VM, fall back to
+> recreate (`instances.insert`) in the controller and note it here.
+
 ## Inference footprint & boot time
 
 Measured for issue #6 with Gemma 4 E2B QAT Q4 (`gemma-4-E2B_q4_0-it.gguf`)
