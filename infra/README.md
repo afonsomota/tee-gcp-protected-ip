@@ -288,17 +288,25 @@ The verifier generates a fresh random nonce, fetches the token from
 JWKS, and checks issuer, audience, `eat_nonce`, and
 `submods.container.image_digest`, printing PASS/FAIL per check.
 
-To exercise `/chat` on a deployed enclave without the browser, use
+To exercise `/chat` or `/enrich` on a deployed enclave without the browser, use
 `scripts/chat-client.py` — it speaks the frontend's HPKE wire format
-(fetch `/hpke-key`, seal the message, open the sealed reply):
+(fetch `/hpke-key`, seal the request, open the sealed reply):
 
 ```sh
 ./scripts/chat-client.py --url "http://$IP:8080" "how was my week?"  # one shot
 ./scripts/chat-client.py --url "http://$IP:8080"                     # interactive
+
+# Enrich an entry: the enclave summarizes, extracts metadata, and (when an
+# embeddings model is loaded) embeds it; the script prints the result.
+./scripts/chat-client.py --url "http://$IP:8080" --enrich \
+    --title "Monday" "Long day, but the demo finally worked."
 ```
 
 In interactive mode the script keeps the conversation history locally and
 resends it in full on every turn — the enclave holds no conversation state.
+In `--enrich` mode the model-bound tools run inside the enclave; only the final
+`attach_metadata` call reaches the client (no local journal, so it acks as a
+no-op and prints the summary, metadata, and embedding dimensionality).
 
 Unlike the frontend, the script does not verify the attestation token before
 trusting the enclave key — pair it with `verify-attestation.py`.
