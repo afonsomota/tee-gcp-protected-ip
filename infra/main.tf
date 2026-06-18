@@ -358,6 +358,9 @@ resource "google_cloudfunctions2_function" "controller" {
       INSTANCE_NAME    = local.instance_name
       INSTANCE_ZONE    = var.zone
       MAX_WEEKLY_BOOTS = tostring(var.max_weekly_boots)
+      # CORS allowlist so the cross-origin browser SPA can read /wake and /idle
+      # responses; empty ⇒ controller falls back to `*` (issue #57).
+      ALLOWED_ORIGINS = join(",", var.frontend_origins)
     }
   }
 

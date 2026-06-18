@@ -98,3 +98,59 @@ def test_idle_counts_over_a_trailing_seven_day_window():
     assert ledger.since is not None
     # The window start is "now minus 7 days", computed at call time.
     assert before <= ledger.since <= after
+
+
+# --- CORS -------------------------------------------------------------------
+
+
+def test_cors_falls_back_to_wildcard_when_no_allowlist(monkeypatch):
+    monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+    headers = main.cors_headers("https://journal.inner-apple.com")
+    # Unconfigured deployments / local dev keep working with a permissive ACAO.
+    assert headers["Access-Control-Allow-Origin"] == "*"
+    assert "POST" in headers["Access-Control-Allow-Methods"]
+    assert "OPTIONS" in headers["Access-Control-Allow-Methods"]
+    # No Vary needed when we don't echo a specific origin.
+    assert "Vary" not in headers
+
+
+def test_cors_echoes_an_allowlisted_origin(monkeypatch):
+    monkeypatch.setenv(
+        "ALLOWED_ORIGINS",
+        "https://journal.inner-apple.com, https://afonsomota.github.io",
+    )
+    headers = main.cors_headers("https://afonsomota.github.io")
+    assert headers["Access-Control-Allow-Origin"] == "https://afonsomota.github.io"
+    assert headers["Vary"] == "Origin"
+
+
+def test_cors_rejects_an_unlisted_origin(monkeypatch):
+    monkeypatch.setenv("ALLOWED_ORIGINS", "https://journal.inner-apple.com")
+    headers = main.cors_headers("https://evil.example.com")
+    # A mismatch echoes an allowlisted origin (not the caller's), so the browser
+    # cleanly blocks the response instead of getting an open `*`.
+    assert headers["Access-Control-Allow-Origin"] == "https://journal.inner-apple.com"
+
+
+class FakeRequest:
+    def __init__(self, method="POST", path="/wake", origin=None):
+        self.method = method
+        self.path = path
+        self.headers = {"Origin": origin} if origin else {}
+
+
+def test_options_preflight_returns_cors_without_touching_the_vm(monkeypatch):
+    # A preflight must never start or stop the instance: force any VM-client
+    # construction to blow up so the test fails if the OPTIONS branch falls
+    # through to the wake/idle dispatch.
+    def _boom():
+        raise AssertionError("OPTIONS preflight must not construct a VM client")
+
+    monkeypatch.setattr(main, "ComputeInstances", _boom)
+    monkeypatch.setenv("ALLOWED_ORIGINS", "https://journal.inner-apple.com")
+    body, status, headers = main.controller(
+        FakeRequest(method="OPTIONS", origin="https://journal.inner-apple.com")
+    )
+    assert status == 204
+    assert headers["Access-Control-Allow-Origin"] == "https://journal.inner-apple.com"
+    assert "OPTIONS" in headers["Access-Control-Allow-Methods"]
