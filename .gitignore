@@ -17,6 +17,14 @@ Thumbs.db
 # Rust
 target/
 
+# Generated harness fixture — build output of harness/, never committed.
+# Rebuilt + signed from source by scripts/build-harness.sh (CI does this
+# before cargo test; locally, run it once). Keeping the binary blob out of
+# the repo keeps the audited TCB's test tree free of opaque, review-invisible
+# artifacts.
+launcher/tests/fixtures/harness/harness.wasm
+launcher/tests/fixtures/harness/harness.wasm.sig
+
 # Node
 node_modules/
 dist/
