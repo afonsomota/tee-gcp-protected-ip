@@ -5,8 +5,9 @@
 use std::path::PathBuf;
 
 /// Read a file from `launcher/tests/fixtures/harness/`, panicking with the
-/// rebuild hint if it's missing (CI rebuilds these via scripts/build-harness.sh
-/// before `cargo test`).
+/// rebuild hint if it's missing. The fixture is build output, not committed
+/// (gitignored): CI rebuilds it via scripts/build-harness.sh before `cargo
+/// test`; locally, run that script once.
 pub fn fixture_file(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/harness")
