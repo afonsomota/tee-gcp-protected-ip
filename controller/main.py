@@ -27,7 +27,14 @@ Config is environment variables (set by Terraform):
 ``INSTANCE_NAME``   the CVM's instance name
 ``INSTANCE_ZONE``   the CVM's zone
 ``MAX_WEEKLY_BOOTS``cold-boot cap per rolling 7 days (default 4; keep < 5)
+``ALLOWED_ORIGINS`` comma-separated CORS allowlist; empty ⇒ ``*`` (issue #57)
 ==================  =========================================================
+
+Every response — wake, idle, the 404, and the CORS preflight ``OPTIONS`` — must
+carry ``Access-Control-Allow-Origin`` because the SPA calls this cross-origin
+from GitHub Pages; without it the browser blocks the response. CORS is not an
+auth boundary (the controller is unauthenticated and trust comes from
+re-attestation), it only lets the browser read what it already reached.
 """
 
 from __future__ import annotations
@@ -59,6 +66,40 @@ def _project() -> str:
 
 def _max_weekly_boots() -> int:
     return int(os.environ.get("MAX_WEEKLY_BOOTS", DEFAULT_MAX_WEEKLY_BOOTS))
+
+
+def _allowed_origins() -> list[str]:
+    """Comma-separated allowlist of browser origins permitted to read responses.
+    Unset/empty means "no allowlist" — we fall back to ``*`` so local/dev and
+    unconfigured deployments keep working."""
+    raw = os.environ.get("ALLOWED_ORIGINS", "")
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+def cors_headers(origin: str | None) -> dict[str, str]:
+    """CORS response headers for a cross-origin browser caller. The controller
+    is unauthenticated either way — CORS is not a security control here (the
+    privacy guarantee comes from re-attestation, not from this front door); it
+    only lets the browser *read* the response. We echo a permitted ``Origin``
+    and otherwise fall back to ``*`` when no allowlist is configured."""
+    allowlist = _allowed_origins()
+    if not allowlist:
+        allow = "*"
+    elif origin and origin in allowlist:
+        allow = origin
+    else:
+        # Origin not permitted: send the first allowlisted origin so the browser
+        # blocks it (a mismatch is a clean CORS failure, not an open door).
+        allow = allowlist[0]
+    headers = {
+        "Access-Control-Allow-Origin": allow,
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    }
+    if allow != "*":
+        # Tell caches the response varies by Origin once we echo a specific one.
+        headers["Vary"] = "Origin"
+    return headers
 
 
 # --- GCP client seams -------------------------------------------------------
@@ -184,6 +225,15 @@ class LoggingLedger:
 
 @functions_framework.http
 def controller(request):
+    # The browser calls this cross-origin (the SPA is served from GitHub Pages,
+    # not the Cloud Functions domain), so every response — including the 404 and
+    # the OPTIONS preflight — must carry CORS headers or the browser blocks it.
+    cors = cors_headers(request.headers.get("Origin"))
+
+    # CORS preflight: answer with the allow-headers and do NOT touch the VM.
+    if request.method == "OPTIONS":
+        return ("", 204, cors)
+
     project = _project()
     zone = os.environ["INSTANCE_ZONE"]
     instance = os.environ["INSTANCE_NAME"]
@@ -193,12 +243,12 @@ def controller(request):
     if path.endswith("/wake"):
         instances = ComputeInstances()
         body, status = handle_wake(instances, project, zone, instance)
-        return (body, status)
+        return (body, status, cors)
     if path.endswith("/idle"):
         instances = ComputeInstances()
         ledger = LoggingLedger(max_boots)
         body, status = handle_idle(
             instances, ledger, project, zone, instance, max_boots
         )
-        return (body, status)
-    return ({"error": "not found", "path": request.path}, 404)
+        return (body, status, cors)
+    return ({"error": "not found", "path": request.path}, 404, cors)

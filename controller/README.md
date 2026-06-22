@@ -36,6 +36,14 @@ built.
 | `INSTANCE_NAME` | the CVM's instance name |
 | `INSTANCE_ZONE` | the CVM's zone |
 | `MAX_WEEKLY_BOOTS` | cold-boot cap per rolling 7 days (default 4; keep `< 5`) |
+| `ALLOWED_ORIGINS` | comma-separated CORS allowlist of browser origins; empty ⇒ falls back to `*` |
+
+The SPA calls `/wake` cross-origin (it is served from GitHub Pages, not the
+Cloud Functions domain), so every response — including the `OPTIONS` preflight —
+carries `Access-Control-Allow-Origin`. `ALLOWED_ORIGINS` is the `frontend_origins`
+Terraform variable. CORS is not an auth boundary here (the controller is
+unauthenticated; trust is re-established by attestation), it only lets the
+browser read a response it already reached.
 
 `MAX_WEEKLY_BOOTS` is the `max_weekly_boots` Terraform variable; the launcher's
 idle timeout is the separate `idle_timeout_minutes` variable (delivered to the

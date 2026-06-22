@@ -213,3 +213,18 @@ variable "max_weekly_boots" {
     error_message = "max_weekly_boots must be positive."
   }
 }
+
+variable "frontend_origins" {
+  description = <<-EOT
+    Browser origins allowed to read the scale-from-zero controller's responses
+    (CORS allowlist). The SPA is served cross-origin from GitHub Pages, so the
+    controller must echo a permitted Origin or the browser blocks the /wake
+    response. Delivered to the controller as the comma-separated ALLOWED_ORIGINS
+    env var. Empty list ⇒ the controller falls back to `*` (open read) — fine
+    for local/dev, but set the real Pages origin(s) for a public deployment.
+    CORS is not an auth boundary here: the controller is unauthenticated either
+    way and the privacy guarantee comes from re-attestation, not this front door.
+  EOT
+  type        = list(string)
+  default     = ["https://journal.inner-apple.com"]
+}
