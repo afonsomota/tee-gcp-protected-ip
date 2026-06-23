@@ -483,3 +483,14 @@ output "controller_url" {
   description = "Scale-from-zero controller base URL (set as VITE_CONTROLLER_ENDPOINT); empty when scale_to_zero is off."
   value       = local.scale_enabled ? google_cloudfunctions2_function.controller[0].url : ""
 }
+
+# Identity of the CVM, so a deploy can reset/start it to load a changed image:
+# Confidential Space reads tee-image-reference only at boot, and an image_digest
+# change is an in-place metadata update that a running VM won't pick up.
+output "instance_name" {
+  value = google_compute_instance.cvm.name
+}
+
+output "instance_zone" {
+  value = google_compute_instance.cvm.zone
+}
