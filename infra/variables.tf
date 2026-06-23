@@ -33,9 +33,20 @@ variable "repository_id" {
 }
 
 variable "machine_type" {
-  description = "Confidential VM machine type (N2D for SEV-SNP)"
+  description = "Confidential VM machine type (N2D for SEV-SNP; c3-* for TDX)"
   type        = string
   default     = "n2d-standard-4"
+}
+
+variable "confidential_instance_type" {
+  description = "Confidential computing tech: SEV_SNP (AMD, default) or TDX (Intel; pair with a c3-* machine_type as a temporary workaround when Google attestation is rejecting SEV-SNP). See HANDOFF-TDX.md."
+  type        = string
+  default     = "SEV_SNP"
+
+  validation {
+    condition     = contains(["SEV_SNP", "TDX"], var.confidential_instance_type)
+    error_message = "confidential_instance_type must be SEV_SNP or TDX."
+  }
 }
 
 variable "confidential_space_image_family" {
