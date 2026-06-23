@@ -46,6 +46,11 @@
 #   CVM_WEIGHTS_OBJECT             encrypted chat-weights manifest object (provision-weights.py); empty = /chat 503
 #   CVM_HARNESS_OBJECT             encrypted harness manifest object (provision-harness.py); empty = /chat 503
 #   CVM_EMBED_WEIGHTS_OBJECT       encrypted embeddings manifest object (optional; empty = keyword search)
+#   CVM_CONFIDENTIAL_INSTANCE_TYPE confidential computing tech: SEV_SNP (default) or TDX. Set to
+#                                  TDX (paired with a c3-* CVM_MACHINE_TYPE) as the temporary
+#                                  workaround while Google attestation rejects SEV-SNP (HANDOFF-TDX.md).
+#   CVM_MACHINE_TYPE               CVM machine type; empty = n2d-standard-4 (SEV-SNP). Use a c3-*
+#                                  type (e.g. c3-standard-4) when CVM_CONFIDENTIAL_INSTANCE_TYPE=TDX.
 # Secret (Settings -> Secrets and variables -> Actions -> Secrets):
 #   GH_VARIABLES_TOKEN              *** NEW *** fine-grained PAT with this repo's
 #                                   "Variables: write" (to set VITE_*) and "Actions: write"
@@ -168,11 +173,16 @@ jobs:
           CVM_WEIGHTS_OBJECT: ${{ vars.CVM_WEIGHTS_OBJECT }}
           CVM_HARNESS_OBJECT: ${{ vars.CVM_HARNESS_OBJECT }}
           CVM_EMBED_WEIGHTS_OBJECT: ${{ vars.CVM_EMBED_WEIGHTS_OBJECT }}
+          CVM_CONFIDENTIAL_INSTANCE_TYPE: ${{ vars.CVM_CONFIDENTIAL_INSTANCE_TYPE }}
+          CVM_MACHINE_TYPE: ${{ vars.CVM_MACHINE_TYPE }}
         run: |
           set -euo pipefail
           # Empty repo vars map to "" which Terraform treats as "feature off"
-          # (no weights/harness/embeddings, plain HTTP). acme_directory can't be
-          # "" (it's validated), so default it to the safe staging directory.
+          # (no weights/harness/embeddings, plain HTTP). Some vars are validated
+          # and reject "", so default those: acme_directory to the safe staging
+          # directory, and the confidential-computing pair to SEV-SNP defaults
+          # (override CVM_CONFIDENTIAL_INSTANCE_TYPE=TDX + CVM_MACHINE_TYPE=c3-*
+          # for the Google-attestation-outage workaround, see HANDOFF-TDX.md).
           terraform -chdir=infra apply -input=false -auto-approve \
             -var "project_id=${GCP_PROJECT_ID}" \
             -var "region=${GCP_REGION}" \
@@ -182,7 +192,9 @@ jobs:
             -var "acme_directory=${CVM_ACME_DIRECTORY:-letsencrypt-staging}" \
             -var "weights_object=${CVM_WEIGHTS_OBJECT}" \
             -var "harness_object=${CVM_HARNESS_OBJECT}" \
-            -var "embed_weights_object=${CVM_EMBED_WEIGHTS_OBJECT}"
+            -var "embed_weights_object=${CVM_EMBED_WEIGHTS_OBJECT}" \
+            -var "confidential_instance_type=${CVM_CONFIDENTIAL_INSTANCE_TYPE:-SEV_SNP}" \
+            -var "machine_type=${CVM_MACHINE_TYPE:-n2d-standard-4}"
 
       - name: Capture deploy outputs
         id: out
