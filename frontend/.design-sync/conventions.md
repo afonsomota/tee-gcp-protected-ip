@@ -49,7 +49,16 @@ Each component's `.prompt.md` and `.d.ts` document its exact props.
 - **PassphraseScreen** — the local-first unlock/create login card (passphrase →
   client-side AES key, no accounts). Centred `.passphrase-card`.
 - **JournalView** — the full three-pane app: entry sidebar, editor, and chat
-  pane. Full-height (`height: 100vh`); give it the whole viewport.
+  pane. Full-height (`height: 100vh`); give it the whole viewport. For the
+  selected entry it also renders the **"Enclave notes"** enrichment panel under
+  the editor: the enclave-produced `summary`, labelled tag rows (emotions /
+  situations / life phases), and an embedding-dimensions + enriched-at meta line.
+  Its classes are `.enrichment` (the panel), `.enrichment-heading`,
+  `.enrichment-summary`, `.enrichment-tags` / `.enrichment-tags-label` /
+  `.enrichment-tags-list` (a tag row), `.tag` (each pill, `border-radius: 20px`
+  like `.attest-badge`), and `.enrichment-meta` (the muted meta line). The panel
+  renders only for a selected entry; the preview passes `initialSelectedId` to
+  focus an enriched entry so the design pass sees it.
 - **ChatPane** — the enclave chat column (transcript, input, attestation badge).
   Driven by a `session` prop carrying the attestation status.
 - **AttestationBadge** — the small pill showing enclave verification state

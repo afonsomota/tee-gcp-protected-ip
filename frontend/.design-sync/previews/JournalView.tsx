@@ -1,9 +1,11 @@
-// Authored preview — the full journal screen: entry list, editor, and the chat
-// pane. db.listEntries() is stubbed with a few realistic entries so the sidebar
-// populates; the editor and chat pane render empty (their initial state). The
-// view runs its own enclave session internally, which can't reach an enclave at
-// preview time, so the chat pane shows its "not verified" state — the honest
-// offline render of this screen.
+// Authored preview — the full journal screen: entry list, editor, the "Enclave
+// notes" enrichment panel, and the chat pane. db.listEntries() is stubbed with a
+// few realistic entries so the sidebar populates; `initialSelectedId` focuses the
+// first (enriched) entry so its editor and enrichment panel render — the panel
+// only shows for a selected entry, which production opens without. The view runs
+// its own enclave session internally, which can't reach an enclave at preview
+// time, so the chat pane shows its "not verified" state — the honest offline
+// render of this screen.
 import { JournalView } from "tee-journal-frontend";
 
 const entries = [
@@ -17,7 +19,9 @@ const entries = [
       enrichedAt: "2026-05-02T09:13:00.000Z",
       emotions: ["anxiety", "hope"],
       situations: ["work"],
+      lifePhases: ["career change"],
       summary: "Starting a new job; nervous but optimistic.",
+      embedding: new Array(768).fill(0),
     },
   },
   {
@@ -44,5 +48,5 @@ const journalKey = {} as CryptoKey;
 
 /** The full three-pane journal: entry list, editor, and the private chat pane. */
 export const Default = () => (
-  <JournalView db={db} journalKey={journalKey} onLock={() => {}} />
+  <JournalView db={db} journalKey={journalKey} onLock={() => {}} initialSelectedId="1" />
 );
