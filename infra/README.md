@@ -275,6 +275,20 @@ still pull the ciphertext but can no longer unwrap the DEK. Caveat for
 deploying the *same* digest create the same IAM binding twice, and the first
 destroy removes it for both — acceptable for dev churn.
 
+## Deploy from GitHub Actions (manual)
+
+`.github/workflows/deploy-cvm.yml` is the CI counterpart to the steps below: a
+manual (`workflow_dispatch`) job that pins a **published** release digest into
+the prod CVM and refreshes the frontend's repo variables to match. It resolves
+the digest (an explicit input, or the latest release's `image-digest.txt`),
+`terraform apply`s the `cvm` root in the `default` workspace, polls + runs
+`verify-attestation.py`, then sets `VITE_EXPECTED_IMAGE_DIGEST` /
+`VITE_API_ENDPOINT` / `VITE_CONTROLLER_ENDPOINT` and re-dispatches the frontend
+deploy. It needs a privileged deployer SA (`GCP_DEPLOY_SERVICE_ACCOUNT`) and a
+`GH_VARIABLES_TOKEN` PAT — the workflow header lists every repo variable/secret
+and the IAM the SA requires. Use it for routine releases; the manual sequence
+below stays the source of truth for first-time / non-prod / debug deploys.
+
 ## Deploy, verify, destroy
 
 ```sh

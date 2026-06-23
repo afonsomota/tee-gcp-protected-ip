@@ -1,0 +1,280 @@
+# Manually deploy the Confidential Space CVM and refresh the frontend's repo
+# variables to match. This is the operational counterpart to release.yml: that
+# workflow builds + cross-checks + publishes the reproducible launcher image
+# (digest D); this one pins a published D into the running CVM (Terraform
+# `infra/` root, prod `default` workspace) and points the SPA at it.
+#
+# Manual only (workflow_dispatch) — deploying costs money and mutates prod, so
+# it never runs on push.
+#
+# What it does, end to end:
+#   1. Resolve the image digest to deploy — an explicit `image_digest` input, or
+#      (default) the `image-digest.txt` asset of the latest GitHub release.
+#   2. `terraform apply` the CVM with that digest + the artifact/TLS parameters
+#      below, then poll the enclave and run verify-attestation.py against D.
+#   3. Update the frontend repo variables from the Terraform outputs:
+#        VITE_EXPECTED_IMAGE_DIGEST  <- the deployed digest D
+#        VITE_API_ENDPOINT           <- https://<tls_domain>  or  http://<ip>:8080
+#        VITE_CONTROLLER_ENDPOINT    <- controller_url output (scale-from-zero)
+#   4. Optionally re-dispatch deploy-frontend.yml so the rebuilt SPA picks the
+#      new digest up (the frontend reads these at *build* time).
+#
+# Trust note: deploying from CI does not make GitHub a trust anchor. The image
+# digest is the anchor and the browser re-verifies the enclave attestation on
+# every connect (frontend/src/attest/). A compromised CI could pin a different
+# digest, but it cannot forge an attestation for code the user didn't audit —
+# the SPA would simply fail to verify. Keep VITE_EXPECTED_IMAGE_DIGEST honest:
+# it must equal the digest of a release whose source you (or an auditor) built.
+#
+# ── One-time repo setup ──────────────────────────────────────────────────────
+# Variables (Settings -> Secrets and variables -> Actions -> Variables):
+#   GCP_PROJECT_ID                  target project (already set for release.yml)
+#   GCP_REGION                      Artifact Registry / deploy region (default europe-west4)
+#   GCP_WORKLOAD_IDENTITY_PROVIDER  GitHub OIDC WIF provider (shared with release.yml)
+#   GCP_DEPLOY_SERVICE_ACCOUNT      *** NEW *** SA the deploy impersonates. Unlike the
+#                                   release SA (artifactregistry.writer only), this one runs
+#                                   Terraform against the cvm root, so it needs broad rights:
+#                                   roles/compute.admin, iam.serviceAccountAdmin,
+#                                   iam.serviceAccountUser, resourcemanager.projectIamAdmin,
+#                                   iam.roleAdmin, cloudkms.admin, storage.admin,
+#                                   cloudfunctions.admin, run.admin, cloudbuild.builds.editor
+#                                   (or roles/owner for a demo project). Grant the GitHub WIF
+#                                   principal roles/iam.workloadIdentityUser on this SA.
+#   CVM_TLS_DOMAIN                  enclave HTTPS domain (e.g. api.example.com); empty = plain HTTP
+#   CVM_ACME_CONTACT               Let's Encrypt contact email (required when CVM_TLS_DOMAIN set)
+#   CVM_ACME_DIRECTORY             letsencrypt-staging (default) or letsencrypt (real certs)
+#   CVM_WEIGHTS_OBJECT             encrypted chat-weights manifest object (provision-weights.py); empty = /chat 503
+#   CVM_HARNESS_OBJECT             encrypted harness manifest object (provision-harness.py); empty = /chat 503
+#   CVM_EMBED_WEIGHTS_OBJECT       encrypted embeddings manifest object (optional; empty = keyword search)
+# Secret (Settings -> Secrets and variables -> Actions -> Secrets):
+#   GH_VARIABLES_TOKEN              *** NEW *** fine-grained PAT with this repo's
+#                                   "Variables: write" (to set VITE_*) and "Actions: write"
+#                                   (to re-dispatch deploy-frontend.yml). The built-in
+#                                   GITHUB_TOKEN cannot manage Actions variables. If absent,
+#                                   the workflow prints the values to set by hand and skips
+#                                   the frontend re-dispatch.
+name: Deploy CVM (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "Image digest to deploy (sha256:...). Leave blank to use the latest release's image-digest.txt."
+        required: false
+        default: ""
+      release_tag:
+        description: "Release tag to source the digest from when image_digest is blank (e.g. v0.1.2). 'latest' uses the most recent release."
+        required: false
+        default: "latest"
+      update_variables:
+        description: "Update VITE_* repo variables from the deploy outputs."
+        type: boolean
+        default: true
+      redeploy_frontend:
+        description: "Re-dispatch deploy-frontend.yml after updating the variables."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read # checkout + download release assets
+  id-token: write # GCP workload identity federation
+
+# One CVM deploy at a time — the cvm Terraform state (prod default workspace)
+# is shared, and an apply must never race another. Don't cancel an in-flight
+# apply (a half-applied CVM is worse than a queued one).
+concurrency:
+  group: deploy-cvm
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION || 'europe-west4' }}
+    steps:
+      - name: Require GCP deploy configuration
+        env:
+          WIF: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOY_SA: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "$GCP_PROJECT_ID" ] || missing+=("GCP_PROJECT_ID")
+          [ -n "$WIF" ] || missing+=("GCP_WORKLOAD_IDENTITY_PROVIDER")
+          [ -n "$DEPLOY_SA" ] || missing+=("GCP_DEPLOY_SERVICE_ACCOUNT")
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::Missing required repo variable(s): ${missing[*]}. See the workflow header for setup."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve image digest
+        id: digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_DIGEST: ${{ inputs.image_digest }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          digest="$INPUT_DIGEST"
+          if [ -z "$digest" ]; then
+            # No explicit digest — pull image-digest.txt from a release.
+            # `gh release download` with no tag fetches the latest release.
+            if [ -z "$RELEASE_TAG" ] || [ "$RELEASE_TAG" = "latest" ]; then
+              echo "Resolving digest from the latest release"
+              gh release download --repo "$GITHUB_REPOSITORY" -p image-digest.txt --clobber
+            else
+              echo "Resolving digest from release $RELEASE_TAG"
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" -p image-digest.txt --clobber
+            fi
+            digest="$(tr -d '[:space:]' < image-digest.txt)"
+          fi
+          if ! echo "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::Resolved digest '$digest' is not sha256:<64 hex>."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Deploying digest: \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false # keep `terraform output -raw` clean for capture
+
+      - name: Terraform init
+        run: |
+          set -euo pipefail
+          terraform -chdir=infra init -input=false \
+            -backend-config="bucket=${GCP_PROJECT_ID}-tfstate" \
+            -backend-config="prefix=cvm"
+          # Prod lives in the default workspace (dev deployments use named ones).
+          terraform -chdir=infra workspace select default
+
+      - name: Terraform apply
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+          CVM_TLS_DOMAIN: ${{ vars.CVM_TLS_DOMAIN }}
+          CVM_ACME_CONTACT: ${{ vars.CVM_ACME_CONTACT }}
+          CVM_ACME_DIRECTORY: ${{ vars.CVM_ACME_DIRECTORY }}
+          CVM_WEIGHTS_OBJECT: ${{ vars.CVM_WEIGHTS_OBJECT }}
+          CVM_HARNESS_OBJECT: ${{ vars.CVM_HARNESS_OBJECT }}
+          CVM_EMBED_WEIGHTS_OBJECT: ${{ vars.CVM_EMBED_WEIGHTS_OBJECT }}
+        run: |
+          set -euo pipefail
+          # Empty repo vars map to "" which Terraform treats as "feature off"
+          # (no weights/harness/embeddings, plain HTTP). acme_directory can't be
+          # "" (it's validated), so default it to the safe staging directory.
+          terraform -chdir=infra apply -input=false -auto-approve \
+            -var "project_id=${GCP_PROJECT_ID}" \
+            -var "region=${GCP_REGION}" \
+            -var "image_digest=${DIGEST}" \
+            -var "tls_domain=${CVM_TLS_DOMAIN}" \
+            -var "acme_contact=${CVM_ACME_CONTACT}" \
+            -var "acme_directory=${CVM_ACME_DIRECTORY:-letsencrypt-staging}" \
+            -var "weights_object=${CVM_WEIGHTS_OBJECT}" \
+            -var "harness_object=${CVM_HARNESS_OBJECT}" \
+            -var "embed_weights_object=${CVM_EMBED_WEIGHTS_OBJECT}"
+
+      - name: Capture deploy outputs
+        id: out
+        env:
+          CVM_TLS_DOMAIN: ${{ vars.CVM_TLS_DOMAIN }}
+        run: |
+          set -euo pipefail
+          ip="$(terraform -chdir=infra output -raw external_ip)"
+          controller="$(terraform -chdir=infra output -raw controller_url 2>/dev/null || true)"
+          if [ -n "$CVM_TLS_DOMAIN" ]; then
+            endpoint="https://${CVM_TLS_DOMAIN}"
+          else
+            endpoint="http://${ip}:8080"
+          fi
+          {
+            echo "ip=$ip"
+            echo "endpoint=$endpoint"
+            echo "controller=$controller"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "- **API endpoint:** $endpoint"
+            echo "- **External IP:** $ip"
+            echo "- **Controller URL:** ${controller:-(scale-from-zero off)}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for the enclave
+        env:
+          ENDPOINT: ${{ steps.out.outputs.endpoint }}
+        run: |
+          set -euo pipefail
+          # Cold boot is image pull + model load + IAM propagation (~2-3 min,
+          # see infra/README.md "Inference footprint & boot time"). Poll /echo
+          # (staging TLS chains to an untrusted root, so -k) up to ~10 min.
+          for i in $(seq 1 60); do
+            if curl -fsS -k "${ENDPOINT}/echo?msg=ci" >/dev/null 2>&1; then
+              echo "Enclave is responding after ~$((i*10))s."
+              exit 0
+            fi
+            echo "waiting for ${ENDPOINT}/echo ... ($i/60)"
+            sleep 10
+          done
+          echo "::error::Enclave did not respond at ${ENDPOINT} within 10 minutes."
+          exit 1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Verify attestation binds to the deployed digest
+        env:
+          ENDPOINT: ${{ steps.out.outputs.endpoint }}
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          uv run --with 'PyJWT[crypto]' --with requests \
+            scripts/verify-attestation.py --url "$ENDPOINT" --image-digest "$DIGEST"
+          echo "Attestation verified against \`$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update frontend repo variables
+        if: ${{ inputs.update_variables }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
+          DIGEST: ${{ steps.digest.outputs.digest }}
+          ENDPOINT: ${{ steps.out.outputs.endpoint }}
+          CONTROLLER: ${{ steps.out.outputs.controller }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::GH_VARIABLES_TOKEN not set — not updating repo variables. Set these by hand:"
+            {
+              echo "### Set these repo variables manually (GH_VARIABLES_TOKEN unset)"
+              echo '```'
+              echo "VITE_EXPECTED_IMAGE_DIGEST = $DIGEST"
+              echo "VITE_API_ENDPOINT          = $ENDPOINT"
+              echo "VITE_CONTROLLER_ENDPOINT   = $CONTROLLER"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh variable set VITE_EXPECTED_IMAGE_DIGEST --repo "$GITHUB_REPOSITORY" --body "$DIGEST"
+          gh variable set VITE_API_ENDPOINT --repo "$GITHUB_REPOSITORY" --body "$ENDPOINT"
+          gh variable set VITE_CONTROLLER_ENDPOINT --repo "$GITHUB_REPOSITORY" --body "$CONTROLLER"
+          echo "Updated VITE_EXPECTED_IMAGE_DIGEST, VITE_API_ENDPOINT, VITE_CONTROLLER_ENDPOINT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Re-dispatch frontend deploy
+        if: ${{ inputs.update_variables && inputs.redeploy_frontend }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::GH_VARIABLES_TOKEN not set — skipping frontend re-dispatch. Run deploy-frontend.yml manually so the SPA rebuilds with the new variables."
+            exit 0
+          fi
+          gh workflow run deploy-frontend.yml --repo "$GITHUB_REPOSITORY" --ref main
+          echo "Dispatched deploy-frontend.yml on main" >> "$GITHUB_STEP_SUMMARY"
