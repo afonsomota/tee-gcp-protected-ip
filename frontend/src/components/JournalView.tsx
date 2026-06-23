@@ -11,11 +11,18 @@ interface Props {
   db: JournalDb;
   journalKey: CryptoKey;
   onLock: () => void;
+  /**
+   * Entry to focus on first mount. Production omits this (the journal opens
+   * with nothing selected); design-sync previews set it so the "Enclave notes"
+   * panel, which only renders for the selected entry, is visible to the design
+   * pass.
+   */
+  initialSelectedId?: string;
 }
 
-export function JournalView({ db, journalKey, onLock }: Props) {
+export function JournalView({ db, journalKey, onLock, initialSelectedId }: Props) {
   const [entries, setEntries] = useState<JournalEntry[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId ?? null);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [status, setStatus] = useState<string | null>(null);
@@ -35,21 +42,17 @@ export function JournalView({ db, journalKey, onLock }: Props) {
     void refresh();
   }, [refresh]);
 
-  // DEBUG (temporary): dump the enclave enrichment for every entry to the
-  // console whenever the list changes — save, enrichment landing, or unlock.
-  // Remove once the on-screen "Enclave notes" panel below is enough.
+  // Populate the editor for an entry focused via `initialSelectedId` once the
+  // list loads. No-op in production, where `initialSelectedId` is undefined.
+  const seededEditor = useRef(false);
   useEffect(() => {
-    console.table(
-      entries.map((e) => ({
-        title: e.title || "Untitled",
-        summary: e.enrichment?.summary ?? "",
-        emotions: e.enrichment?.emotions?.join(", ") ?? "",
-        situations: e.enrichment?.situations?.join(", ") ?? "",
-        lifePhases: e.enrichment?.lifePhases?.join(", ") ?? "",
-        embeddingDims: e.enrichment?.embedding?.length ?? 0,
-      })),
-    );
-  }, [entries]);
+    if (seededEditor.current || initialSelectedId === undefined) return;
+    const entry = entries.find((e) => e.id === initialSelectedId);
+    if (entry === undefined) return;
+    seededEditor.current = true;
+    setTitle(entry.title);
+    setBody(entry.body);
+  }, [entries, initialSelectedId]);
 
   const selected = entries.find((e) => e.id === selectedId) ?? null;
 
@@ -58,8 +61,6 @@ export function JournalView({ db, journalKey, onLock }: Props) {
     setTitle(entry?.title ?? "");
     setBody(entry?.body ?? "");
     setStatus(null);
-    // DEBUG (temporary): log the focused entry's enrichment object in full.
-    console.log("[enrichment]", entry?.title ?? "(none)", entry?.enrichment ?? null);
   }
 
   /**
