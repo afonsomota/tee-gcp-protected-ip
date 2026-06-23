@@ -3,8 +3,8 @@
 This walks the full trust chain of a live deployment, one step at a time.
 Each section explains **what the step proves** and **what is still assumed**
 afterwards, so you always know exactly where you stand. By the end, the only
-remaining assumptions are the platform itself (AMD silicon and Google's
-Confidential Space stack) — everything else you will have checked with your
+remaining assumptions are the platform itself (AMD or Intel silicon and
+Google's Confidential Space stack) — everything else you will have checked with your
 own tools on your own machine.
 
 The whole chain is automated by one command:
@@ -34,7 +34,7 @@ curl "https://HOST/attestation?nonce=$NONCE"
 
 The launcher forwards your nonce to the Confidential Space attestation
 service (a Unix socket only present inside a real Confidential VM, backed by
-an AMD SEV-SNP hardware report) and returns the OIDC token (a JWT) that
+an AMD SEV-SNP or Intel TDX hardware report) and returns the OIDC token (a JWT) that
 Google's service mints.
 
 **Proven:** nothing yet. Anyone can return bytes shaped like a token.
@@ -93,7 +93,7 @@ cannot influence this value; it is measured by the platform before the
 workload starts.
 
 **Proven:** Google attests that *this exact image* — byte-for-byte, by
-cryptographic digest — is what is running in the enclave, on SEV-SNP
+cryptographic digest — is what is running in the enclave, on SEV-SNP or TDX
 hardware, with the launch policy in the image's labels enforced.
 
 **Still assumed:** nothing yet links that digest to any source code you can
@@ -176,8 +176,8 @@ reproducibly from source too is recorded as future hardening
 
 **Still assumed (the floor you cannot verify away):**
 
-- AMD's silicon implements SEV-SNP correctly, and Google's Confidential
-  Space stack (firmware, OS image, container launcher) does what it says.
+- AMD's or Intel's silicon implements SEV-SNP or TDX correctly, and Google's
+  Confidential Space stack (firmware, OS image, container launcher) does what it says.
   Google could in principle mint a false token. See
   [threat-model.md](threat-model.md) for why this is the accepted platform
   TCB.

@@ -1,7 +1,7 @@
 # Infra — Confidential Space walking skeleton
 
 Terraform for the attested-echo walking skeleton (issue 002): a GCP
-Confidential Space CVM (AMD SEV-SNP) running the `launcher/` container, which
+Confidential Space CVM (AMD SEV-SNP or Intel TDX) running the `launcher/` container, which
 serves `/echo` and `/attestation`.
 
 Two Terraform roots:
@@ -196,7 +196,7 @@ digest**. Moving parts:
   re-running with the same model is a no-op.
 - **main root**: with `weights_object` set, the CVM gets metadata attributes
   the launcher reads at boot (bucket/object/key/pool-provider audience), a
-  `tee-mount` tmpfs at `/models` (decrypted weights live only in SEV-SNP
+  `tee-mount` tmpfs at `/models` (decrypted weights live only in SEV-SNP / TDX
   guest memory; the image label `tee.launch_policy.allow_mount_destinations`
   admits the mount), GCS read for the ciphertext, and the per-digest KMS
   decrypt grant.
@@ -533,8 +533,8 @@ dev enclave, drop the printed address into `frontend/.env.local`:
 VITE_API_ENDPOINT=http://DEV_IP:8080
 ```
 
-**Cost**: every dev deployment is a full SEV-SNP N2D instance billed while
-it runs. Tear yours down when done; `make dev-list` shows leftover
+**Cost**: every dev deployment is a full Confidential Space CVM (SEV-SNP N2D
+or TDX c3-*) billed while it runs. Tear yours down when done; `make dev-list` shows leftover
 workspaces, and dev instances carry labels for sweeping by hand:
 
 ```sh

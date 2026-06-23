@@ -12,7 +12,7 @@ in [verifying.md](verifying.md).
 ```
                  user's machine                          Google Cloud
   ┌────────────────────────────────────┐   ┌─────────────────────────────────────┐
-  │  Browser (SPA, local-first)        │   │  Confidential Space CVM (SEV-SNP)   │
+  │  Browser (SPA, local-first)        │   │  Confidential Space CVM (SEV/TDX)   │
   │   passphrase → Argon2id master key │   │  ┌───────────────────────────────┐  │
   │   entries encrypted in IndexedDB   │   │  │ launcher (open, audited)      │  │
   │   verifies attestation (badge)     │◄──┼──┤  axum · attestation · HPKE    │  │
@@ -123,7 +123,7 @@ trusted build service). [verifying.md](verifying.md) walks the whole chain.
 | Data | Where | Protection |
 |---|---|---|
 | journal entries, embeddings, metadata | browser IndexedDB only | encrypted client-side (passphrase → Argon2id → master key) |
-| chat/session plaintext | enclave memory, per session | SEV-SNP memory encryption; never written |
+| chat/session plaintext | enclave memory, per session | SEV-SNP / TDX memory encryption; never written |
 | model weights, harness blob | GCS, encrypted | KMS key released only to the attested digest [#7] |
 | ACME/TLS cert state | enclave memory only — fresh account + cert per boot [#4] | dies with the instance; nothing cloud-side |
 | user accounts | — | none exist; login *is* client-side key derivation |

@@ -7,7 +7,7 @@ company's IP protection must not require the user to behave.
 
 | Claim | Who it protects | TCB |
 |---|---|---|
-| **Privacy:** journal entries are processed only by open, auditable code; nobody — company, cloud provider, network — can read them | the user | AMD silicon + Google Confidential Space stack + the open launcher and its dependency tree + the frontend code the user runs |
+| **Privacy:** journal entries are processed only by open, auditable code; nobody — company, cloud provider, network — can read them | the user | AMD or Intel silicon + Google Confidential Space stack + the open launcher and its dependency tree + the frontend code the user runs |
 | **IP:** model weights and the harness blob are released only into an attested enclave running the published image | the company | Google Cloud KMS / IAM + the attestation-gated key-release policy |
 
 Note the asymmetry: Google IAM appears only in the **IP** TCB. If KMS
@@ -16,8 +16,8 @@ because no user data is ever at rest in the cloud.
 
 ## The privacy TCB, bottom to top
 
-1. **AMD SEV-SNP silicon.** Memory encryption and the hardware attestation
-   report. Not verifiable by software above it; accepted.
+1. **AMD SEV-SNP or Intel TDX silicon.** Memory encryption and the hardware
+   attestation report. Not verifiable by software above it; accepted.
 2. **Google's Confidential Space stack** — firmware, the hardened OS image,
    the container launcher, and the attestation service that signs tokens.
    Google measures the workload container and mints OIDC tokens naming its
@@ -73,13 +73,13 @@ asking users to trust closed code.**
 - Cannot quietly swap the enclave code: a different image yields a different
   attested digest; browsers and CLI verifiers reject it.
 - Cannot forge attestation: tokens are signed by Google, keyed to a real
-  SEV-SNP report.
+  SEV-SNP or TDX report.
 - Can deny service, and can ship a malicious *frontend* to users who don't
   verify (TOFU, below).
 
 **Google (cloud + TEE vendor):**
 - Cannot read enclave memory through the normal hypervisor path (SEV-SNP
-  encrypts guest memory; that is the product).
+  and TDX encrypt guest memory; that is the product).
 - Could mint a false attestation token or backdoor the Confidential Space
   stack — platform TCB, **accepted and documented**.
 - Sees traffic metadata (IPs, timing, sizes) like any host.
@@ -123,7 +123,7 @@ lying verifier. Mitigations, in increasing strength:
 
 ## Explicitly out of scope
 
-- **Side-channel attacks** on SEV-SNP (power, timing, controlled-channel,
+- **Side-channel attacks** on SEV-SNP / TDX (power, timing, controlled-channel,
   speculative execution). Real research area; out of scope for this demo.
 - **Compromised user device** — malware, malicious browser extensions, or a
   hostile browser see plaintext before encryption. Nothing server-side can

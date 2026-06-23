@@ -2,7 +2,7 @@
 
 A tiny, always-reachable Cloud Function (gen2, Python) that toggles the
 Confidential Space CVM between `TERMINATED` (no compute cost) and `RUNNING`.
-Confidential Space has no serverless mode for SEV-SNP, so "scale from zero" is
+Confidential Space has no serverless mode for SEV-SNP or TDX, so "scale from zero" is
 **stop/start one CVM** fronted by this controller.
 
 **It is outside the audited TCB and holds no privacy trust.** The frontend

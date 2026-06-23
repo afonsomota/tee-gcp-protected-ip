@@ -71,7 +71,7 @@ ENV LLAMA_ARG_HOST=127.0.0.1
 LABEL "tee.launch_policy.log_redirect"="always"
 # Allow the operator's tee-mount tmpfs at /models: artifact delivery
 # (issue 007) decrypts the weights there so plaintext only ever exists in
-# SEV-SNP-encrypted guest memory, never on disk.
+# SEV-SNP/TDX-encrypted guest memory, never on disk.
 LABEL "tee.launch_policy.allow_mount_destinations"="/models"
 # 8080 = plain HTTP; 443 = TLS terminated in-enclave (issue 004), the only
 # port TLS-ALPN-01 validates on. The launcher binds one or the other, never

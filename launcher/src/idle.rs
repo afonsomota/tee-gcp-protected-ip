@@ -1,6 +1,6 @@
 //! Scale-from-zero idle timer (issue #45).
 //!
-//! Confidential Space has no serverless mode for SEV-SNP, so "scale to zero" is
+//! Confidential Space has no serverless mode for SEV-SNP or TDX, so "scale to zero" is
 //! a stopped VM woken on demand by a tiny always-on controller (a Cloud
 //! Function; see `controller/`). This module is the launcher half: an idle
 //! timer that, after `idle-timeout-minutes` with no inbound request, pokes the

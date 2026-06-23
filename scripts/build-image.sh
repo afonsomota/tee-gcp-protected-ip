@@ -149,7 +149,7 @@ for _ in $(seq 1 50); do curl -fsS "http://$REG/v2/" >/dev/null 2>&1 && break; s
 # even default to binding the model to a public interface.
 # allow_mount_destinations=/models lets the operator attach the tee-mount
 # tmpfs that artifact delivery (issue 007) decrypts the weights into —
-# plaintext weights only ever exist in SEV-SNP-encrypted guest memory.
+# plaintext weights only ever exist in SEV-SNP/TDX-encrypted guest memory.
 # Exposed ports must be set on the IMAGE: Confidential Space (image >= 230600)
 # keeps every inbound port closed at the VM unless the image exposes it, so a
 # Dockerfile EXPOSE on the dev-only buildx path is not enough — this crane

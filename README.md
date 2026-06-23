@@ -14,7 +14,7 @@ be *checkable*, not a promise:
 
 Concretely: entries live encrypted in your browser (no server-side accounts
 or data at rest), and are processed only inside a GCP Confidential Space CVM
-(AMD SEV-SNP) running an open, audited launcher whose container image digest
+(AMD SEV-SNP or Intel TDX) running an open, audited launcher whose container image digest
 is attested by the hardware and re-derivable from this source code by
 anyone. The company's closed model-orchestration code runs inside that same
 enclave — as a deny-by-default WebAssembly sandbox the open code cages. The
