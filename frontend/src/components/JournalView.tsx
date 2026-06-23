@@ -35,6 +35,22 @@ export function JournalView({ db, journalKey, onLock }: Props) {
     void refresh();
   }, [refresh]);
 
+  // DEBUG (temporary): dump the enclave enrichment for every entry to the
+  // console whenever the list changes — save, enrichment landing, or unlock.
+  // Remove once the on-screen "Enclave notes" panel below is enough.
+  useEffect(() => {
+    console.table(
+      entries.map((e) => ({
+        title: e.title || "Untitled",
+        summary: e.enrichment?.summary ?? "",
+        emotions: e.enrichment?.emotions?.join(", ") ?? "",
+        situations: e.enrichment?.situations?.join(", ") ?? "",
+        lifePhases: e.enrichment?.lifePhases?.join(", ") ?? "",
+        embeddingDims: e.enrichment?.embedding?.length ?? 0,
+      })),
+    );
+  }, [entries]);
+
   const selected = entries.find((e) => e.id === selectedId) ?? null;
 
   function select(entry: JournalEntry | null) {
@@ -42,6 +58,8 @@ export function JournalView({ db, journalKey, onLock }: Props) {
     setTitle(entry?.title ?? "");
     setBody(entry?.body ?? "");
     setStatus(null);
+    // DEBUG (temporary): log the focused entry's enrichment object in full.
+    console.log("[enrichment]", entry?.title ?? "(none)", entry?.enrichment ?? null);
   }
 
   /**
@@ -210,9 +228,44 @@ export function JournalView({ db, journalKey, onLock }: Props) {
           )}
           {status !== null && <span className="muted">{status}</span>}
         </div>
+
+        {selected?.enrichment !== undefined && (
+          <div className="enrichment">
+            <h3 className="enrichment-heading">🏷️ Enclave notes</h3>
+            {selected.enrichment.summary !== undefined && (
+              <p className="enrichment-summary">{selected.enrichment.summary}</p>
+            )}
+            <TagRow label="Emotions" tags={selected.enrichment.emotions} />
+            <TagRow label="Situations" tags={selected.enrichment.situations} />
+            <TagRow label="Life phases" tags={selected.enrichment.lifePhases} />
+            <p className="enrichment-meta muted">
+              {selected.enrichment.embedding !== undefined &&
+                `Semantic embedding · ${selected.enrichment.embedding.length} dimensions`}
+              {selected.enrichment.enrichedAt !== undefined &&
+                ` · enriched ${new Date(selected.enrichment.enrichedAt).toLocaleString()}`}
+            </p>
+          </div>
+        )}
       </section>
 
       <ChatPane db={db} journalKey={journalKey} session={session} />
+    </div>
+  );
+}
+
+/** One labelled row of enrichment tags; renders nothing when the list is empty. */
+function TagRow({ label, tags }: { label: string; tags?: string[] }) {
+  if (tags === undefined || tags.length === 0) return null;
+  return (
+    <div className="enrichment-tags">
+      <span className="enrichment-tags-label">{label}</span>
+      <span className="enrichment-tags-list">
+        {tags.map((tag) => (
+          <span key={tag} className="tag">
+            {tag}
+          </span>
+        ))}
+      </span>
     </div>
   );
 }

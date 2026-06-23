@@ -454,3 +454,55 @@ textarea {
   background: color-mix(in srgb, currentColor 6%, transparent);
   font-weight: 600;
 }
+
+/* Enrichment ("Enclave notes") panel under the editor. */
+.enrichment {
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.enrichment-heading {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.enrichment-summary {
+  margin: 0 0 0.6rem;
+  line-height: 1.45;
+}
+
+.enrichment-tags {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0.35rem 0;
+  flex-wrap: wrap;
+}
+
+.enrichment-tags-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  min-width: 5.5rem;
+}
+
+.enrichment-tags-list {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.tag {
+  font-size: 0.78rem;
+  padding: 0.12rem 0.55rem;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.enrichment-meta {
+  margin: 0.6rem 0 0;
+  font-size: 0.75rem;
+}
