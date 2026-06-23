@@ -1,5 +1,7 @@
 # tee-example
 
+Demo: [Journal](https://journal.inner-apple.com/)
+
 A demo of hardware-backed privacy guarantees: a journal app with a chatbot,
 built to show how a company can make this pitch to its users — and have it
 be *checkable*, not a promise:
