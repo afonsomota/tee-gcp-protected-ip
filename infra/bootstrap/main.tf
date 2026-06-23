@@ -60,6 +60,12 @@ resource "google_project_service" "apis" {
     "compute.googleapis.com",
     "confidentialcomputing.googleapis.com",
     "artifactregistry.googleapis.com",
+    # Reads/edits the project IAM policy: the main root's google_project_iam_member
+    # bindings call the Cloud Resource Manager API. A user-account `apply` masks
+    # this (gcloud bills the call to its own quota project), but the deploy-cvm
+    # workflow's impersonated CI service account is attributed to this project, so
+    # without it every IAM binding 403s with "API ... has not been used".
+    "cloudresourcemanager.googleapis.com",
     # Service-account management: the main root creates the workload SA;
     # also needed to manage the workload identity pool + release SA that
     # the release workflow's registry push authenticates through.
