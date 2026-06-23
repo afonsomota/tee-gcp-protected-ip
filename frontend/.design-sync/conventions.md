@@ -28,11 +28,15 @@ to style these components — they own their classes (`.attest-badge`, `.chat-pa
 When you write your **own** layout/glue around them, match the system's vocabulary
 instead of inventing one:
 
-- **Tokens** (defined on `:root`): `var(--accent)` — the brand/primary colour
-  (#4f6df5); `var(--border)` — subtle hairline borders; `var(--muted)` —
-  secondary text. `color-scheme: light dark` is set, so colours adapt to the
-  theme; use `currentColor`/`color-mix` like the stylesheet does rather than
-  hard-coding greys.
+- **Tokens** (defined on `:root`): a warm "OliveGradient" paper theme.
+  `var(--paper)` (#f6f2e9) is the app background; `var(--surface)` (#efe9da) the
+  rail/inspector/panels; `var(--surface-raised)` (#fbfaf6) lifted cells.
+  `var(--accent)` is olive (#6b7338); `var(--ink)`/`var(--ink-body)` the warm
+  near-black text; `var(--muted)`/`var(--faint)` secondary text; `var(--border)`
+  the hairline. `var(--brand-gradient)` is the spectrum brand mark. The reading
+  surface (titles/body) uses `var(--font-serif)`. The theme is light-only
+  (`color-scheme: light`, explicit surface backgrounds) — don't rely on the UA
+  canvas or `currentColor` for greys; use the tokens.
 - **Buttons** are styled by element + modifier class: a bare `<button>` is the
   filled accent button; `<button className="secondary">` is the ghost/outline
   variant; `<button className="danger">` is destructive (red).

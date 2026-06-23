@@ -207,7 +207,10 @@ export function JournalView({
           >
             <span className="hamburger" aria-hidden="true" />
           </button>
-          <span className="brand">Journal</span>
+          <span className="brand">
+            <span className="brand-mark" aria-hidden="true" />
+            Journal
+          </span>
           <AttestationBadge status={session.status} onRetry={() => void session.verify()} />
         </div>
         <div className="topbar-group">

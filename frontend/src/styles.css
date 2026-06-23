@@ -1,9 +1,21 @@
 :root {
-  color-scheme: light dark;
+  /* Warm "OliveGradient" palette adopted from the design mock. It is a
+     light/paper theme with no dark variant, so the scheme is pinned to light
+     and surfaces carry explicit backgrounds (no reliance on the UA canvas). */
+  color-scheme: light;
   font-family: system-ui, -apple-system, sans-serif;
-  --accent: #4f6df5;
-  --border: color-mix(in srgb, currentColor 18%, transparent);
-  --muted: color-mix(in srgb, currentColor 55%, transparent);
+  --paper: #f6f2e9; /* app background */
+  --surface: #efe9da; /* rail, inspector, panels */
+  --surface-raised: #fbfaf6; /* lifted cells: metadata, cards */
+  --ink: #21261a; /* headings / strong text */
+  --ink-body: #2b2f22; /* body copy */
+  --accent: #6b7338; /* olive */
+  --accent-deep: #474e25;
+  --border: color-mix(in srgb, #21261a 16%, transparent);
+  --muted: #6a6e5c; /* soft secondary text */
+  --faint: #9a9a86;
+  --font-serif: ui-serif, Georgia, "Times New Roman", serif;
+  --brand-gradient: linear-gradient(125deg, #a6c53a, #2e9a55, #1fb6c2, #2e5ad6, #4b34b8, #7a2fa6);
 }
 
 * {
@@ -12,6 +24,8 @@
 
 body {
   margin: 0;
+  background: var(--paper);
+  color: var(--ink-body);
 }
 
 #root {
@@ -526,8 +540,22 @@ textarea {
 }
 
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   font-weight: 600;
   font-size: 1.05rem;
+  color: var(--ink);
+}
+
+/* Brand mark: the mock's spectrum gradient as a solid disc. */
+.brand-mark {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--brand-gradient);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.45);
 }
 
 /* Square ghost button used for the rail toggle, the collapsed "new" button, and
@@ -631,6 +659,7 @@ textarea {
   flex: none;
   min-height: 0;
   overflow: hidden;
+  background: var(--surface);
   transition: width 0.24s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -776,13 +805,15 @@ textarea {
   gap: 14px;
 }
 
-/* The title/body become a borderless writing surface inside the article. */
+/* The title/body become a borderless serif writing surface on the paper. */
 .title-input {
-  font-size: 1.7rem;
-  font-weight: 600;
+  font-family: var(--font-serif);
+  font-size: 2rem;
+  font-weight: 500;
+  color: var(--ink);
   border: none;
   padding: 0;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.015em;
 }
 
 .body-input {
@@ -790,8 +821,10 @@ textarea {
   resize: none;
   border: none;
   padding: 0;
-  line-height: 1.7;
-  font-size: 1.02rem;
+  font-family: var(--font-serif);
+  line-height: 1.74;
+  font-size: 1.1rem;
+  color: var(--ink-body);
   min-height: 38vh;
 }
 
@@ -808,7 +841,7 @@ textarea {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  background: Canvas;
+  background: var(--surface);
   border-left: 1px solid var(--border);
   box-shadow: none;
   transform: translateX(100%);
@@ -912,7 +945,7 @@ textarea {
   flex-direction: column;
   gap: 4px;
   padding: 10px 12px;
-  background: Canvas;
+  background: var(--surface-raised);
 }
 
 .meta-cell--wide {
@@ -955,4 +988,23 @@ textarea {
   margin: 0;
   font-size: 0.8rem;
   line-height: 1.5;
+}
+
+/* Warm-palette typographic touches: serif for reading/writing content and
+   page headings; a mood-free olive edge on the selected entry card. */
+.entry-title,
+.details-title,
+.passphrase-card h1,
+.know-more__content h1,
+.know-more__content h2 {
+  font-family: var(--font-serif);
+}
+
+.details-title,
+.passphrase-card h1 {
+  color: var(--ink);
+}
+
+.entry-link.selected {
+  box-shadow: inset 3px 0 0 var(--accent);
 }
