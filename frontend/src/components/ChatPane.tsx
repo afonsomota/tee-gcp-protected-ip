@@ -6,6 +6,7 @@ import type { EnclaveSession } from "../attest/useEnclaveSession";
 import { config } from "../lib/config";
 import type { JournalDb } from "../lib/store";
 import { AttestationBadge } from "./AttestationBadge";
+import { Markdown } from "./Markdown";
 
 interface Props {
   /** The unlocked journal — the client tools read and write entries through it. */
@@ -122,7 +123,13 @@ export function ChatPane({ db, journalKey, session, embedded = false }: Props) {
         {items.map((item, i) =>
           item.kind === "message" ? (
             <div key={i} className={`chat-bubble chat-bubble--${item.role}`}>
-              {item.content}
+              {item.role === "assistant" ? (
+                <div className="chat-markdown">
+                  <Markdown>{item.content}</Markdown>
+                </div>
+              ) : (
+                item.content
+              )}
             </div>
           ) : (
             <div

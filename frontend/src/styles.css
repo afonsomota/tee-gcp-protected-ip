@@ -369,6 +369,83 @@ textarea {
   font-style: italic;
 }
 
+/* Markdown-rendered assistant replies. The bubble keeps `pre-wrap` for plain
+   user text; here we render real block elements, so reset to normal flow and
+   trim the leading/trailing block margins to the bubble padding. */
+.chat-markdown {
+  white-space: normal;
+}
+
+.chat-markdown > :first-child {
+  margin-top: 0;
+}
+
+.chat-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.md-p {
+  margin: 0.5em 0;
+}
+
+.md-h {
+  margin: 0.7em 0 0.35em;
+  font-family: var(--font-serif);
+  font-size: 1em;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--ink);
+}
+
+.md-list {
+  margin: 0.4em 0;
+  padding-left: 1.35em;
+}
+
+.md-list li {
+  margin: 0.15em 0;
+}
+
+.md-list li::marker {
+  color: var(--muted);
+}
+
+.md-quote {
+  margin: 0.5em 0;
+  padding-left: 0.75em;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.md-code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.85em;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  padding: 0.05em 0.32em;
+  border-radius: 4px;
+}
+
+.md-pre {
+  margin: 0.55em 0;
+  padding: 0.6em 0.75em;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.md-pre code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.82em;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.chat-markdown a {
+  color: var(--accent-deep);
+  text-decoration: underline;
+  word-break: break-word;
+}
+
 .chat-error {
   font-size: 0.8rem;
   color: #d04545;
