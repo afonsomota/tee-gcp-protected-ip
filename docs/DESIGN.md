@@ -16,7 +16,7 @@ provably constrains: nothing leaves except the reply you see."*
 
 | Area | Decision |
 |---|---|
-| TEE platform | **GCP Confidential Space** on AMD SEV-SNP. Attestation token (signed by Google) includes the workload container image digest. |
+| TEE platform | **GCP Confidential Space** on AMD SEV-SNP or Intel TDX. Attestation token (signed by Google) includes the workload container image digest. |
 | Model | **Gemma 4 E2B** (GGUF) on CPU via a `llama-server` subprocess on `127.0.0.1`; **EmbeddingGemma** in a second instance for embeddings. Weights stored encrypted in GCS; decryption key in Cloud KMS, IAM-gated on a valid attestation of the published image digest. (Gemma weights are publicly licensed — the secrecy is simulated; the *mechanism* is real.) |
 | Closed harness | Rust compiled to **WebAssembly**, run under **wasmtime** in the open launcher. Deny-by-default: its only capabilities are the host functions the launcher exposes. Delivered encrypted in GCS + KMS attestation-gated (same pipeline as weights), and signed with a company key pinned in the launcher. Users don't need to trust the harness at all — the sandbox is the guarantee. |
 | Launcher (the audited TCB) | **Rust**: axum, wasmtime, hpke, rustls + rustls-acme, GCS/KMS clients, llama-server supervision. The smaller and more legible, the better — this is what skeptical auditors read. |

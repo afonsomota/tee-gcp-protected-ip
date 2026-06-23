@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A demo of hardware-backed privacy guarantees: a journal app with a chatbot where user data is processed only by open-source, auditable code inside a GCP Confidential Space CVM (AMD SEV-SNP), while the company's proprietary "harness" runs sandboxed (wasm) inside that same enclave. The architecture, trust model, and all major decisions live in `docs/DESIGN.md` — read it before making design-level changes.
+A demo of hardware-backed privacy guarantees: a journal app with a chatbot where user data is processed only by open-source, auditable code inside a GCP Confidential Space CVM (AMD SEV-SNP or Intel TDX), while the company's proprietary "harness" runs sandboxed (wasm) inside that same enclave. The architecture, trust model, and all major decisions live in `docs/DESIGN.md` — read it before making design-level changes.
 
 Work is tracked in `issues/` (local markdown issue tracker). `issues/README.md` has the dependency graph; each issue is a vertical slice. Check the relevant issue before implementing — acceptance criteria live there. Resolved design questions are recorded in `docs/spikes/`.
 

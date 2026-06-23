@@ -6,7 +6,7 @@
 //! workload-identity principal* (the only principal granted decrypt — see
 //! infra/), streams the ciphertext from GCS through the envelope decryptor
 //! into the tmpfs at `/models` (plaintext weights only ever exist in
-//! SEV-SNP-encrypted guest memory), verifies size and SHA-256, and hands the
+//! SEV-SNP/TDX-encrypted guest memory), verifies size and SHA-256, and hands the
 //! file to the llama-server supervisor. `/chat` serves errors until the
 //! model is up — the same window as an image-baked model load.
 //!

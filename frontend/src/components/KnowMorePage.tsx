@@ -17,13 +17,14 @@ export function KnowMorePage({ onBack }: Props) {
         <h1>How your privacy is protected</h1>
 
         <section>
-          <h2>The enclave (AMD SEV-SNP)</h2>
+          <h2>The enclave (AMD SEV-SNP or Intel TDX)</h2>
           <p>
             Your messages are processed inside a{" "}
             <strong>Confidential Space virtual machine</strong> on Google Cloud. The VM runs on AMD
-            hardware with SEV-SNP (Secure Encrypted Virtualization – Secure Nested Paging), which
-            means the memory of the VM is encrypted by the CPU and cannot be read — not by the
-            cloud provider, not by the operator, not by any other process on the same host.
+            hardware with SEV-SNP (Secure Encrypted Virtualization – Secure Nested Paging) or Intel
+            hardware with TDX (Trust Domain Extensions), which means the memory of the VM is
+            encrypted by the CPU and cannot be read — not by the cloud provider, not by the
+            operator, not by any other process on the same host.
           </p>
         </section>
 
