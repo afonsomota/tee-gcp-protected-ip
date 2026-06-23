@@ -1,0 +1,27 @@
+{
+  "projectId": "9c30d76a-7b78-443a-92bd-99db55ad960a",
+  "shape": "package",
+  "pkg": "tee-journal-frontend",
+  "globalName": "TeeJournalUI",
+  "entry": ".design-sync/ds-entry.tsx",
+  "cssEntry": "src/styles.css",
+  "readmeHeader": ".design-sync/conventions.md",
+  "componentSrcMap": {
+    "AttestationBadge": "src/components/AttestationBadge.tsx",
+    "ChatPane": "src/components/ChatPane.tsx",
+    "JournalView": "src/components/JournalView.tsx",
+    "KnowMorePage": "src/components/KnowMorePage.tsx",
+    "PassphraseScreen": "src/components/PassphraseScreen.tsx"
+  },
+  "overrides": {
+    "ChatPane": { "cardMode": "column" },
+    "JournalView": { "cardMode": "column" }
+  },
+  "dtsPropsFor": {
+    "AttestationBadge": "  /**\n   * Current state of the enclave attestation handshake. The badge renders a\n   * distinct colour and label for each `kind` (pending / failed / verified).\n   */\n  status:\n    | { kind: \"idle\" | \"verifying\" | \"warming\" }\n    | { kind: \"failed\"; code: string; detail: string }\n    | { kind: \"verified\"; signatureVerified: boolean };\n  /** Called when the user clicks \"Retry\" on a failed badge. */\n  onRetry: () => void;",
+    "PassphraseScreen": "  /**\n   * The local, client-side encrypted journal (IndexedDB-backed). The screen\n   * calls `hasJournal()` to choose between unlock and create, and `unlock()`\n   * to stretch the passphrase (Argon2id) into the journal's AES key.\n   */\n  db: {\n    hasJournal(): Promise<boolean>;\n    unlock(passphrase: string): Promise<{ key: CryptoKey }>;\n    importJournal(bytes: Uint8Array): Promise<void>;\n  };\n  /** Called with the derived journal key once the passphrase unlocks it. */\n  onUnlocked: (key: CryptoKey) => void;",
+    "ChatPane": "  /** The unlocked journal the client-side tools read and write through. */\n  db: unknown;\n  /** The AES key for the unlocked journal. */\n  journalKey: CryptoKey;\n  /** The shared, verified enclave session: attestation status + pinned HPKE key. */\n  session: {\n    status:\n      | { kind: \"idle\" | \"verifying\" | \"warming\" }\n      | { kind: \"failed\"; code: string; detail: string }\n      | { kind: \"verified\"; signatureVerified: boolean; hpkePublicKey: unknown };\n    /** Re-run attestation (e.g. after the enclave restarts). */\n    verify: () => Promise<void>;\n  };",
+    "JournalView": "  /** The unlocked, client-side encrypted journal (IndexedDB-backed). */\n  db: unknown;\n  /** The AES key for the unlocked journal. */\n  journalKey: CryptoKey;\n  /** Called to lock the journal and return to the passphrase screen. */\n  onLock: () => void;",
+    "KnowMorePage": "  /** Called when the user clicks \"Back to journal\". */\n  onBack: () => void;"
+  }
+}
