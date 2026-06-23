@@ -28,7 +28,9 @@ const SUMMARIZE_SYSTEM: &str = "You summarize a personal journal entry in one or
     with the summary only — no preamble, no quotes.";
 
 /// Fixed, auditable prompt for the `extract_metadata` capability. The model is
-/// asked for strict JSON; `parse_metadata` is lenient about what comes back.
+/// asked for strict JSON; the request also constrains decoding to the schema in
+/// `metadata_response_format`, and `parse_metadata` is lenient about what comes
+/// back — the shape is enforced in three independent layers.
 const EXTRACT_SYSTEM: &str = "You extract structured metadata from a personal \
     journal entry. Respond with ONLY a JSON object with exactly these keys: \
     \"emotions\", \"situations\", \"lifePhases\". Each value is an array of at \
@@ -81,33 +83,92 @@ async fn embed(text: &str, upstreams: &Upstreams) -> Result<Value, String> {
 
 /// `summarize` → `{ "summary": "<text>" }`.
 async fn summarize(text: &str, upstreams: &Upstreams) -> Result<Value, String> {
-    let summary = complete(&upstreams.chat, SUMMARIZE_SYSTEM, text, SUMMARY_MAX_TOKENS)
-        .await
-        .map_err(|()| "enclave tool \"summarize\": inference failed".to_string())?;
+    let summary = complete(
+        &upstreams.chat,
+        SUMMARIZE_SYSTEM,
+        text,
+        SUMMARY_MAX_TOKENS,
+        None,
+    )
+    .await
+    .map_err(|()| "enclave tool \"summarize\": inference failed".to_string())?;
     Ok(json!({ "summary": summary.trim() }))
 }
 
 /// `extract_metadata` → `{ "emotions": [..], "situations": [..], "lifePhases": [..] }`.
-/// The model is asked for JSON; if it returns something unparseable we degrade
-/// to empty arrays rather than fail the enrichment turn.
+/// Decoding is constrained to `metadata_response_format`, so the model returns
+/// schema-valid JSON; if some upstream ignores that and returns something
+/// unparseable, `parse_metadata` degrades to empty arrays rather than failing
+/// the enrichment turn.
 async fn extract_metadata(text: &str, upstreams: &Upstreams) -> Result<Value, String> {
-    let raw = complete(&upstreams.chat, EXTRACT_SYSTEM, text, METADATA_MAX_TOKENS)
-        .await
-        .map_err(|()| "enclave tool \"extract_metadata\": inference failed".to_string())?;
+    let raw = complete(
+        &upstreams.chat,
+        EXTRACT_SYSTEM,
+        text,
+        METADATA_MAX_TOKENS,
+        Some(metadata_response_format()),
+    )
+    .await
+    .map_err(|()| "enclave tool \"extract_metadata\": inference failed".to_string())?;
     Ok(parse_metadata(&raw))
 }
 
 /// One chat completion with a fixed system prompt over the given user text.
-async fn complete(upstream: &str, system: &str, text: &str, max_tokens: u32) -> Result<String, ()> {
-    let body = json!({
+/// `response_format`, when given, is llama-server's constrained-decoding spec
+/// (see `metadata_response_format`).
+///
+/// We always send `chat_template_kwargs: {"enable_thinking": false}`. The
+/// deployed Gemma GGUF ships a chat template with a reasoning channel enabled;
+/// on these short, instruction-shaped tasks the model intermittently spends the
+/// whole (small) token budget inside an unclosed `<|channel>thought` trace, so
+/// llama-server strips the reasoning and returns empty `content` — the empty
+/// `summarize`/`extract_metadata` output of issue #50 (spike 003). Turning
+/// thinking off makes the model emit its answer directly, deterministically.
+async fn complete(
+    upstream: &str,
+    system: &str,
+    text: &str,
+    max_tokens: u32,
+    response_format: Option<Value>,
+) -> Result<String, ()> {
+    let mut body = json!({
         "messages": [
             { "role": "system", "content": system },
             { "role": "user", "content": text },
         ],
         "max_tokens": max_tokens,
+        "chat_template_kwargs": { "enable_thinking": false },
+    });
+    if let Some(rf) = response_format {
+        body["response_format"] = rf;
+    }
+    crate::upstream::chat_completion(upstream, body.to_string()).await
+}
+
+/// llama-server constrained-decoding spec that forces `extract_metadata`'s
+/// reply to the exact `{emotions, situations, lifePhases}` shape — three arrays
+/// of at most five short string tags. With thinking disabled (see `complete`)
+/// this makes the model emit schema-valid JSON every time; `parse_metadata`
+/// stays as the defensive fallback for any upstream that ignores the schema.
+fn metadata_response_format() -> Value {
+    let tags = json!({ "type": "array", "items": { "type": "string" }, "maxItems": 5 });
+    json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "journal_metadata",
+            "strict": true,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "emotions": tags.clone(),
+                    "situations": tags.clone(),
+                    "lifePhases": tags,
+                },
+                "required": ["emotions", "situations", "lifePhases"],
+                "additionalProperties": false,
+            },
+        },
     })
-    .to_string();
-    crate::upstream::chat_completion(upstream, body).await
 }
 
 /// Parse the model's metadata reply into the three tag arrays. Tolerant: it
@@ -247,6 +308,81 @@ mod tests {
         assert!(summary.contains("started a new job"), "got: {summary}");
     }
 
+    /// A llama stand-in that records the request body it last received, so a
+    /// test can assert on the parameters the enclave tools *send* (not just the
+    /// reply). Returns its `host:port` and a handle to the captured body.
+    async fn capturing_llama() -> (String, std::sync::Arc<std::sync::Mutex<Option<Value>>>) {
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(None));
+        let sink = seen.clone();
+        let handler = move |Json(body): Json<Value>| {
+            let sink = sink.clone();
+            async move {
+                *sink.lock().unwrap() = Some(body);
+                Json(json!({
+                    "choices": [{ "message": { "role": "assistant", "content": "{}" } }]
+                }))
+            }
+        };
+        let app = Router::new().route("/v1/chat/completions", post(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("127.0.0.1:{}", addr.port()), seen)
+    }
+
+    // Issue #50 / spike 003: the deployed Gemma template has a reasoning channel
+    // that, on these short tasks, swallows the whole token budget and yields
+    // empty output. Both enclave completions must turn thinking off so the model
+    // answers directly.
+    #[tokio::test]
+    async fn summarize_disables_thinking_and_does_not_constrain_output() {
+        let (upstream, seen) = capturing_llama().await;
+        execute(
+            "summarize",
+            &json!({ "text": "x" }),
+            &upstreams(upstream, None),
+        )
+        .await
+        .unwrap();
+        let body = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"],
+            json!(false)
+        );
+        // Free-text summary: no forced grammar.
+        assert!(body.get("response_format").is_none(), "got: {body}");
+    }
+
+    #[tokio::test]
+    async fn extract_metadata_disables_thinking_and_constrains_to_schema() {
+        let (upstream, seen) = capturing_llama().await;
+        execute(
+            "extract_metadata",
+            &json!({ "text": "x" }),
+            &upstreams(upstream, None),
+        )
+        .await
+        .unwrap();
+        let body = seen.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"],
+            json!(false)
+        );
+        assert_eq!(body["response_format"]["type"], json!("json_schema"));
+        let schema = &body["response_format"]["json_schema"]["schema"];
+        assert_eq!(
+            schema["required"],
+            json!(["emotions", "situations", "lifePhases"])
+        );
+        assert_eq!(schema["additionalProperties"], json!(false));
+        // The cap on tags lives in the grammar as well as in parse_metadata.
+        assert_eq!(schema["properties"]["emotions"]["maxItems"], json!(5));
+    }
+
     #[tokio::test]
     async fn missing_text_argument_is_rejected() {
         let err = execute(
@@ -257,5 +393,51 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("text"), "unexpected: {err}");
+    }
+
+    /// End-to-end check of issue #50 against a *real* `llama-server` running the
+    /// production Gemma GGUF — the acceptance criterion that the fix be verified
+    /// against a faithful local run, not only mocks. Ignored by default (CI has
+    /// no model); run it with the chat upstream in the environment:
+    ///
+    /// ```sh
+    /// llama-server -m gemma-4-E2B_q4_0-it.gguf --port 8099 --no-webui &
+    /// TEE_LIVE_CHAT=127.0.0.1:8099 cargo test live_enrich -- --ignored --nocapture
+    /// ```
+    ///
+    /// Asserts what the pre-fix model failed at: a non-empty summary and at
+    /// least one populated metadata field, repeatably (the bug was intermittent).
+    #[tokio::test]
+    #[ignore = "needs a live llama-server with the production model; set TEE_LIVE_CHAT"]
+    async fn live_enrich_yields_nonempty_summary_and_metadata() {
+        let Ok(chat) = std::env::var("TEE_LIVE_CHAT") else {
+            eprintln!("skipping: set TEE_LIVE_CHAT=host:port to a live llama-server");
+            return;
+        };
+        let entry = "Today was rough. I finally told my manager I'm burning out and \
+            need to step back from the launch. Saying it out loud was terrifying, but \
+            she was kind and we agreed I'd hand off on-call. Relief, then guilt about \
+            letting the team down before the deadline. Walked by the river to clear my head.";
+        let ups = upstreams(chat, None);
+
+        // Run several times: the pre-fix failure was intermittent (the reasoning
+        // channel only sometimes blew the token budget), so a single pass could
+        // pass by luck. With thinking off it must succeed every time.
+        for i in 0..5 {
+            let summary = execute("summarize", &json!({ "text": entry }), &ups)
+                .await
+                .unwrap();
+            let s = summary["summary"].as_str().unwrap_or_default();
+            assert!(!s.trim().is_empty(), "run {i}: empty summary");
+
+            let meta = execute("extract_metadata", &json!({ "text": entry }), &ups)
+                .await
+                .unwrap();
+            let populated = ["emotions", "situations", "lifePhases"]
+                .iter()
+                .any(|k| meta[k].as_array().is_some_and(|a| !a.is_empty()));
+            assert!(populated, "run {i}: all metadata fields empty: {meta}");
+            eprintln!("run {i}: summary={s:?} metadata={meta}");
+        }
     }
 }
