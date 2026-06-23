@@ -13,6 +13,13 @@ interface Props {
   journalKey: CryptoKey;
   /** The shared, verified enclave session (attestation + pinned HPKE key). */
   session: EnclaveSession;
+  /**
+   * Rendered inside the inspector drawer's "Companion" tab rather than as a
+   * standalone column. Drops the pane's own header (title + attestation badge),
+   * since the drawer tab labels it and the trust badge lives in the app header,
+   * and lets the pane fill the drawer's height.
+   */
+  embedded?: boolean;
 }
 
 /**
@@ -24,20 +31,24 @@ type ChatItem =
   | { kind: "message"; role: "user" | "assistant"; content: string }
   | { kind: "tool"; activity: ToolActivity };
 
-export function ChatPane({ db, journalKey, session }: Props) {
+export function ChatPane({ db, journalKey, session, embedded = false }: Props) {
   const { status: attestStatus, verify } = session;
   const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
 
   // The tool executor is bound to the unlocked journal; rebuild it only if the
   // db or key changes (e.g. after a re-unlock).
   const executeTool = useMemo(() => makeToolExecutor(db, journalKey), [db, journalKey]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    // Scroll the transcript container itself, not via scrollIntoView — the
+    // latter scrolls every scrollable ancestor (incl. the window), which would
+    // yank the viewport toward the pane when it sits in an off-screen drawer.
+    const el = messagesRef.current;
+    if (el !== null) el.scrollTop = el.scrollHeight;
   }, [items, sending]);
 
   const canChat = attestStatus.kind === "verified";
@@ -92,13 +103,15 @@ export function ChatPane({ db, journalKey, session }: Props) {
   }
 
   return (
-    <section className="chat-pane">
-      <header className="chat-header">
-        <h2>Private chat</h2>
-        <AttestationBadge status={attestStatus} onRetry={() => void verify()} />
-      </header>
+    <section className={embedded ? "chat-pane chat-pane--embedded" : "chat-pane"}>
+      {!embedded && (
+        <header className="chat-header">
+          <h2>Private chat</h2>
+          <AttestationBadge status={attestStatus} onRetry={() => void verify()} />
+        </header>
+      )}
 
-      <div className="chat-messages">
+      <div className="chat-messages" ref={messagesRef}>
         {items.length === 0 && (
           <p className="chat-empty muted">
             {canChat
@@ -128,7 +141,6 @@ export function ChatPane({ db, journalKey, session }: Props) {
           <div className="chat-bubble chat-bubble--assistant chat-bubble--thinking muted">…</div>
         )}
         {chatError !== null && <p className="chat-error">{chatError}</p>}
-        <div ref={bottomRef} />
       </div>
 
       <form

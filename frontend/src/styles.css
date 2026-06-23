@@ -1,9 +1,21 @@
 :root {
-  color-scheme: light dark;
+  /* Warm "OliveGradient" palette adopted from the design mock. It is a
+     light/paper theme with no dark variant, so the scheme is pinned to light
+     and surfaces carry explicit backgrounds (no reliance on the UA canvas). */
+  color-scheme: light;
   font-family: system-ui, -apple-system, sans-serif;
-  --accent: #4f6df5;
-  --border: color-mix(in srgb, currentColor 18%, transparent);
-  --muted: color-mix(in srgb, currentColor 55%, transparent);
+  --paper: #f6f2e9; /* app background */
+  --surface: #efe9da; /* rail, inspector, panels */
+  --surface-raised: #fbfaf6; /* lifted cells: metadata, cards */
+  --ink: #21261a; /* headings / strong text */
+  --ink-body: #2b2f22; /* body copy */
+  --accent: #6b7338; /* olive */
+  --accent-deep: #474e25;
+  --border: color-mix(in srgb, #21261a 16%, transparent);
+  --muted: #6a6e5c; /* soft secondary text */
+  --faint: #9a9a86;
+  --font-serif: ui-serif, Georgia, "Times New Roman", serif;
+  --brand-gradient: linear-gradient(125deg, #a6c53a, #2e9a55, #1fb6c2, #2e5ad6, #4b34b8, #7a2fa6);
 }
 
 * {
@@ -12,6 +24,8 @@
 
 body {
   margin: 0;
+  background: var(--paper);
+  color: var(--ink-body);
 }
 
 #root {
@@ -93,7 +107,11 @@ textarea {
 
 .journal {
   display: flex;
+  flex-direction: column;
   height: 100vh;
+  /* App shell: panes scroll internally; the shell itself never scrolls, so the
+     off-screen (closed) inspector drawer can't push out a page scrollbar. */
+  overflow: hidden;
 }
 
 .sidebar {
@@ -455,20 +473,8 @@ textarea {
   font-weight: 600;
 }
 
-/* Enrichment ("Enclave notes") panel under the editor. */
-.enrichment {
-  margin-top: 1rem;
-  padding: 0.85rem 1rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
-}
-
-.enrichment-heading {
-  margin: 0 0 0.5rem;
-  font-size: 0.9rem;
-}
-
+/* Enrichment ("Enclave notes") surface. Lives in the inspector's Details tab;
+   these classes style the summary, tag rows, and meta line there. */
 .enrichment-summary {
   margin: 0 0 0.6rem;
   line-height: 1.45;
@@ -505,4 +511,500 @@ textarea {
 .enrichment-meta {
   margin: 0.6rem 0 0;
   font-size: 0.75rem;
+}
+
+/* ==========================================================================
+   Writing-first layout (redesign): top bar + collapsible entries rail + hero
+   editor + on-demand overlay inspector drawer (chat / details). The drawer
+   floats over the editor (absolute, not a third column) so opening it never
+   crushes the writing column. Rules below override the base .journal / .sidebar
+   / .editor / .chat-pane declarations above.
+   ========================================================================== */
+
+/* Top bar */
+.topbar {
+  height: 62px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 600;
+  font-size: 1.05rem;
+  color: var(--ink);
+}
+
+/* Brand mark: the mock's spectrum gradient as a solid disc. */
+.brand-mark {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--brand-gradient);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.45);
+}
+
+/* Square ghost button used for the rail toggle, the collapsed "new" button, and
+   the drawer close — transparent with a hairline border, subtle hover fill. */
+.icon-button {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.icon-button:hover {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+/* CSS hamburger: three 15×2px bars, 3px gaps. */
+.hamburger,
+.hamburger::before,
+.hamburger::after {
+  display: block;
+  width: 15px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 2px;
+}
+
+.hamburger {
+  position: relative;
+}
+
+.hamburger::before,
+.hamburger::after {
+  content: "";
+  position: absolute;
+  left: 0;
+}
+
+.hamburger::before {
+  top: -5px;
+}
+
+.hamburger::after {
+  top: 5px;
+}
+
+/* Segmented control (header + in-drawer tabs). */
+.seg {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 40px;
+  overflow: hidden;
+}
+
+.seg-btn {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.85rem;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.seg-btn + .seg-btn {
+  border-left: 1px solid var(--border);
+}
+
+.seg-btn:hover {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.seg-btn.active,
+.seg-btn.active:hover {
+  background: var(--accent);
+  color: white;
+}
+
+/* Body row: the relative positioning context the inspector drawer overlays.
+   `overflow: hidden` clips the closed drawer (parked at translateX(100%) beyond
+   the right edge) so it never adds a horizontal scrollbar. */
+.journal-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Entries rail: animated width, 322px open / 64px collapsed. */
+.sidebar {
+  width: 322px;
+  flex: none;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+  transition: width 0.24s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar--collapsed {
+  width: 64px;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Small uppercase mono label used for rail/section headers. */
+.rail-label {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.rail-search {
+  margin: 0.6rem 0.7rem 0.4rem;
+}
+
+.entry-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem 0 0.2rem;
+}
+
+.entry-group-label {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0.2rem 0.6rem;
+}
+
+/* Two-line body preview in the entry card. */
+.entry-preview {
+  font-size: 0.78rem;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Collapsed rail: a centred column of enrichment-status dots. */
+.rail-collapsed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.7rem 0;
+  overflow: hidden;
+}
+
+.rail-divider {
+  width: 24px;
+  height: 1px;
+  background: var(--border);
+  flex: none;
+}
+
+.rail-dots {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  overflow-y: auto;
+  padding: 0.2rem 0;
+}
+
+/* A dot per entry: filled accent when enriched, muted tint otherwise; the
+   selected entry gets a ring. No mood data exists, so the dot encodes the one
+   real per-entry signal we have — whether the enclave has enriched it. */
+.rail-dot {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  padding: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.rail-dot.enriched {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+  border-color: transparent;
+}
+
+.rail-dot.selected {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* Center editor — the hero. min-width guarantees it is never crushed. */
+.editor {
+  flex: 1;
+  min-width: 380px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+  gap: 0;
+}
+
+.editor-meta {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 22px;
+  padding: 14px 40px;
+  border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.editor-surface {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  justify-content: center;
+  padding: 40px 40px 80px;
+}
+
+.editor-article {
+  width: min(680px, 100%);
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* The title/body become a borderless serif writing surface on the paper. */
+.title-input {
+  font-family: var(--font-serif);
+  font-size: 2rem;
+  font-weight: 500;
+  color: var(--ink);
+  border: none;
+  padding: 0;
+  letter-spacing: -0.015em;
+}
+
+.body-input {
+  flex: 1;
+  resize: none;
+  border: none;
+  padding: 0;
+  font-family: var(--font-serif);
+  line-height: 1.74;
+  font-size: 1.1rem;
+  color: var(--ink-body);
+  min-height: 38vh;
+}
+
+/* Inspector drawer: overlay, not a flex sibling — opening it never narrows the
+   editor. Fixed 384px inner width so it doesn't reflow during the slide. */
+.inspector {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 384px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: none;
+  transform: translateX(100%);
+  transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.inspector.open {
+  transform: translateX(0);
+  box-shadow: -18px 0 44px rgba(0, 0, 0, 0.13);
+}
+
+.inspector-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.inspector-head .icon-button {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.inspector-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Companion tab — the existing ChatPane, embedded, with a context strip. */
+.companion {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.companion-context {
+  flex: none;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-pane--embedded {
+  width: 100%;
+  height: 100%;
+  border-left: none;
+}
+
+.companion .chat-pane--embedded {
+  flex: 1;
+  min-height: 0;
+}
+
+/* Details tab — real entry metadata + enclave enrichment + live trust card. */
+.details {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 16px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.details-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.details-title {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+/* Hairline metadata grid: cells sit on a border-coloured bg with 1px gaps. */
+.meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.meta-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--surface-raised);
+}
+
+.meta-cell--wide {
+  grid-column: 1 / -1;
+}
+
+.meta-key {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.meta-val {
+  font-size: 0.9rem;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  word-break: break-all;
+}
+
+.details-enrichment {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.trust-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.trust-card p {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+/* Warm-palette typographic touches: serif for reading/writing content and
+   page headings; a mood-free olive edge on the selected entry card. */
+.entry-title,
+.details-title,
+.passphrase-card h1,
+.know-more__content h1,
+.know-more__content h2 {
+  font-family: var(--font-serif);
+}
+
+.details-title,
+.passphrase-card h1 {
+  color: var(--ink);
+}
+
+.entry-link.selected {
+  box-shadow: inset 3px 0 0 var(--accent);
 }

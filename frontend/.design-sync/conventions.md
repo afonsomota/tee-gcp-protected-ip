@@ -28,11 +28,15 @@ to style these components — they own their classes (`.attest-badge`, `.chat-pa
 When you write your **own** layout/glue around them, match the system's vocabulary
 instead of inventing one:
 
-- **Tokens** (defined on `:root`): `var(--accent)` — the brand/primary colour
-  (#4f6df5); `var(--border)` — subtle hairline borders; `var(--muted)` —
-  secondary text. `color-scheme: light dark` is set, so colours adapt to the
-  theme; use `currentColor`/`color-mix` like the stylesheet does rather than
-  hard-coding greys.
+- **Tokens** (defined on `:root`): a warm "OliveGradient" paper theme.
+  `var(--paper)` (#f6f2e9) is the app background; `var(--surface)` (#efe9da) the
+  rail/inspector/panels; `var(--surface-raised)` (#fbfaf6) lifted cells.
+  `var(--accent)` is olive (#6b7338); `var(--ink)`/`var(--ink-body)` the warm
+  near-black text; `var(--muted)`/`var(--faint)` secondary text; `var(--border)`
+  the hairline. `var(--brand-gradient)` is the spectrum brand mark. The reading
+  surface (titles/body) uses `var(--font-serif)`. The theme is light-only
+  (`color-scheme: light`, explicit surface backgrounds) — don't rely on the UA
+  canvas or `currentColor` for greys; use the tokens.
 - **Buttons** are styled by element + modifier class: a bare `<button>` is the
   filled accent button; `<button className="secondary">` is the ghost/outline
   variant; `<button className="danger">` is destructive (red).
@@ -48,19 +52,38 @@ Each component's `.prompt.md` and `.d.ts` document its exact props.
 
 - **PassphraseScreen** — the local-first unlock/create login card (passphrase →
   client-side AES key, no accounts). Centred `.passphrase-card`.
-- **JournalView** — the full three-pane app: entry sidebar, editor, and chat
-  pane. Full-height (`height: 100vh`); give it the whole viewport. For the
-  selected entry it also renders the **"Enclave notes"** enrichment panel under
-  the editor: the enclave-produced `summary`, labelled tag rows (emotions /
-  situations / life phases), and an embedding-dimensions + enriched-at meta line.
-  Its classes are `.enrichment` (the panel), `.enrichment-heading`,
-  `.enrichment-summary`, `.enrichment-tags` / `.enrichment-tags-label` /
-  `.enrichment-tags-list` (a tag row), `.tag` (each pill, `border-radius: 20px`
-  like `.attest-badge`), and `.enrichment-meta` (the muted meta line). The panel
-  renders only for a selected entry; the preview passes `initialSelectedId` to
-  focus an enriched entry so the design pass sees it.
+- **JournalView** — the full **writing-first** app. Full-height
+  (`height: 100vh`); give it the whole viewport. A vertical stack: a fixed
+  **top bar** (`.topbar`, 62px — rail toggle `.icon-button` with a `.hamburger`
+  glyph, `.brand`, a live `AttestationBadge`, and a `.seg` segmented control with
+  `.seg-btn` Companion/Details tabs) over a **body row** (`.journal-body`,
+  `position: relative`). The body holds three regions:
+  - **Entries rail** (`.sidebar`, animated width — 322px open / 64px
+    `.sidebar--collapsed`). Open: a `.rail-label` header + New button, a
+    `.rail-search` filter, and recency-grouped cards (`.entry-group` /
+    `.entry-group-label`, `.entry-link`, `.entry-title`, `.entry-date`,
+    two-line `.entry-preview`). Collapsed (`.rail-collapsed`): a column of
+    `.rail-dot`s (filled `.enriched` / `.selected` ring) — one real signal per
+    entry, whether the enclave has enriched it (there is no "mood" data).
+  - **Hero editor** (`.editor`, `min-width: 380px` so it's never crushed): a mono
+    `.editor-meta` line (date · words · reading time) over a centred
+    `.editor-surface` → `.editor-article` (max 680px) holding the borderless
+    `.title-input` / `.body-input` and `.editor-actions`.
+  - **Inspector drawer** (`.inspector`, `.inspector.open`): an **overlay**
+    (`position: absolute`, 384px, `z-index: 4`) that slides via `transform` and
+    so never narrows the editor. Tabs: **Companion** (`.companion` — a
+    `.companion-context` strip + the embedded `ChatPane`) and **Details**
+    (`.details` — `.details-title`, a hairline `.meta-grid` of `.meta-cell`
+    [`.meta-key` / `.meta-val`], the **"Enclave notes"** enrichment
+    [`.enrichment-summary`, `.enrichment-tags*`, `.tag` pill `border-radius: 20px`,
+    `.enrichment-meta`], and a `.trust-card` wrapping a live `AttestationBadge`).
+  The editor + Details only render for a selected entry; the preview passes
+  `initialSelectedId`, and `initialInspectorOpen` + `initialInspectorTab` to open
+  the drawer (production opens with it closed, writing-first).
 - **ChatPane** — the enclave chat column (transcript, input, attestation badge).
-  Driven by a `session` prop carrying the attestation status.
+  Driven by a `session` prop carrying the attestation status. Pass `embedded`
+  to drop its own header and fill a container (`.chat-pane--embedded`) — that's
+  how JournalView mounts it inside the inspector's Companion tab.
 - **AttestationBadge** — the small pill showing enclave verification state
   (`status.kind`: idle / verifying / warming / verified / failed). The trust
   indicator; place it wherever the user needs to see the enclave is verified.

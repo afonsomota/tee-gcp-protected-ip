@@ -1,11 +1,14 @@
-// Authored preview — the full journal screen: entry list, editor, the "Enclave
-// notes" enrichment panel, and the chat pane. db.listEntries() is stubbed with a
-// few realistic entries so the sidebar populates; `initialSelectedId` focuses the
-// first (enriched) entry so its editor and enrichment panel render — the panel
-// only shows for a selected entry, which production opens without. The view runs
-// its own enclave session internally, which can't reach an enclave at preview
-// time, so the chat pane shows its "not verified" state — the honest offline
-// render of this screen.
+// Authored preview — the full writing-first journal screen: the top bar, the
+// collapsible entries rail, the hero editor, and the on-demand inspector drawer.
+// db.listEntries() is stubbed with a few realistic entries so the rail populates;
+// `initialSelectedId` focuses the first (enriched) entry so the editor and the
+// inspector's metadata render (both only show for a selected entry, which
+// production opens without). `initialInspectorOpen` + `initialInspectorTab`
+// open the drawer on the Details tab so the design pass sees the new metadata UI
+// (grid, enclave-notes, trust card); production opens with the drawer closed.
+// The view runs its own enclave session internally, which can't reach an enclave
+// at preview time, so the trust badge shows its "not verified" state — the honest
+// offline render of this screen.
 import { JournalView } from "tee-journal-frontend";
 
 const entries = [
@@ -46,7 +49,15 @@ const db = {
 } as never;
 const journalKey = {} as CryptoKey;
 
-/** The full three-pane journal: entry list, editor, and the private chat pane. */
+/** The writing-first journal: rail, hero editor, and the inspector drawer open
+ *  on Details so the metadata grid, enclave notes, and trust card are styled. */
 export const Default = () => (
-  <JournalView db={db} journalKey={journalKey} onLock={() => {}} initialSelectedId="1" />
+  <JournalView
+    db={db}
+    journalKey={journalKey}
+    onLock={() => {}}
+    initialSelectedId="1"
+    initialInspectorOpen
+    initialInspectorTab="details"
+  />
 );
