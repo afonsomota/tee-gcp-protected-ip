@@ -79,6 +79,10 @@ on:
         description: "Re-dispatch deploy-frontend.yml after updating the variables."
         type: boolean
         default: true
+      reload_cvm:
+        description: "Reset/start the CVM after apply so it boots the deployed image. A running CVM won't pick up an image change otherwise (cold boot ~2-3 min). Uncheck for non-image changes (TLS/weights only)."
+        type: boolean
+        default: true
 
 permissions:
   contents: read # checkout + download release assets
@@ -219,6 +223,31 @@ jobs:
             echo "- **External IP:** $ip"
             echo "- **Controller URL:** ${controller:-(scale-from-zero off)}"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Reload the CVM onto the deployed image
+        if: ${{ inputs.reload_cvm }}
+        run: |
+          set -euo pipefail
+          # Confidential Space reads tee-image-reference only at boot, and an
+          # image_digest change is an in-place metadata update — a running CVM
+          # keeps serving the old container until it reboots (so the verify step
+          # below would fail on image_digest). Hard-reset a running instance (or
+          # start a stopped one) so it relaunches on the deployed image; the
+          # "Wait for the enclave" step then waits out the cold boot.
+          name="$(terraform -chdir=infra output -raw instance_name)"
+          zone="$(terraform -chdir=infra output -raw instance_zone)"
+          status="$(gcloud compute instances describe "$name" --zone "$zone" --format='value(status)')"
+          echo "CVM $name ($zone) is $status"
+          if [ "$status" = "RUNNING" ]; then
+            gcloud compute instances reset "$name" --zone "$zone"
+            # A hard reset kills the old container immediately, but pause so the
+            # next step's /echo poll can't catch a lingering old process.
+            sleep 20
+            echo "Reset running CVM to reload the deployed image." >> "$GITHUB_STEP_SUMMARY"
+          else
+            gcloud compute instances start "$name" --zone "$zone"
+            echo "Started CVM (was $status) to load the deployed image." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Wait for the enclave
         env:
