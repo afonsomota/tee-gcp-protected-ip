@@ -383,11 +383,13 @@ resource "google_cloud_run_service_iam_member" "controller_public" {
 }
 
 resource "google_compute_instance" "cvm" {
-  name             = local.instance_name
-  machine_type     = var.machine_type
-  zone             = var.zone
-  tags             = ["tee-example"]
-  min_cpu_platform = "AMD Milan"
+  name         = local.instance_name
+  machine_type = var.machine_type
+  zone         = var.zone
+  tags         = ["tee-example"]
+  # SEV-SNP requires the AMD Milan platform; TDX runs on Intel (c3-*) and rejects an
+  # AMD min_cpu_platform, so only pin it for SEV-SNP. See HANDOFF-TDX.md.
+  min_cpu_platform = var.confidential_instance_type == "SEV_SNP" ? "AMD Milan" : null
 
   # Label dev instances so stale deployments are easy to find and sweep:
   #   gcloud compute instances list --filter=labels.created-by=dev-deploy
@@ -398,7 +400,9 @@ resource "google_compute_instance" "cvm" {
 
   confidential_instance_config {
     enable_confidential_compute = true
-    confidential_instance_type  = "SEV_SNP"
+    # Default SEV_SNP (AMD); override to TDX (with a c3-* machine_type) when Google's
+    # attestation service is rejecting SEV-SNP. See HANDOFF-TDX.md.
+    confidential_instance_type = var.confidential_instance_type
   }
 
   scheduling {
