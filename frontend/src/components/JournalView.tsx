@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type Ref,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { enrichEntry } from "../attest/enrich";
 import { makeToolExecutor } from "../attest/tools";
 import type { EnclaveSession } from "../attest/useEnclaveSession";
@@ -6,10 +14,19 @@ import { useEnclaveSession } from "../attest/useEnclaveSession";
 import { config } from "../lib/config";
 import type { JournalDb } from "../lib/store";
 import { type JournalEntry, newEntry } from "../lib/types";
-import { AttestationBadge } from "./AttestationBadge";
+import { AttestationBadge, AttestationPill } from "./AttestationBadge";
 import { ChatPane } from "./ChatPane";
 
 type InspectorTab = "companion" | "details";
+
+// Below this width the entries rail stops being a column and becomes an
+// off-canvas drawer (must match the max-width: 900px block in styles.css).
+const NARROW_QUERY = "(max-width: 900px)";
+
+/** The breakpoint's MediaQueryList, or null where matchMedia is missing (jsdom). */
+function narrowMedia(): MediaQueryList | null {
+  return typeof window.matchMedia === "function" ? window.matchMedia(NARROW_QUERY) : null;
+}
 
 interface Props {
   db: JournalDb;
@@ -48,11 +65,17 @@ export function JournalView({
   // Ids currently being enriched in the enclave (async, non-blocking).
   const [enriching, setEnriching] = useState<Set<string>>(new Set());
   const fileInput = useRef<HTMLInputElement>(null);
+  const trustCard = useRef<HTMLDivElement>(null);
+  const titleInput = useRef<HTMLTextAreaElement>(null);
+  const bodyInput = useRef<HTMLTextAreaElement>(null);
 
   // Writing-first view state: a collapsible entries rail and an on-demand
   // inspector drawer (chat + details) that floats over the editor (issue: the
   // old three-pane layout crushed the editor). Defaults to a clean focus view.
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // On narrow screens both panes are drawers over the editor: the entries
+  // drawer starts closed, and only one drawer is open at a time.
+  const [narrow, setNarrow] = useState(() => narrowMedia()?.matches ?? false);
+  const [sidebarOpen, setSidebarOpen] = useState(!narrow);
   const [inspectorOpen, setInspectorOpen] = useState(initialInspectorOpen ?? false);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>(
     initialInspectorTab ?? "companion",
@@ -83,6 +106,50 @@ export function JournalView({
     setBody(entry.body);
   }, [entries, initialSelectedId]);
 
+  // Crossing the breakpoint resets the rail to that layout's default.
+  useEffect(() => {
+    const mq = narrowMedia();
+    if (mq === null) return;
+    const onChange = () => {
+      setNarrow(mq.matches);
+      setSidebarOpen(!mq.matches);
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  // Escape dismisses whatever is floating over the editor. Only listens while
+  // something is; ignores Escapes that belong to an IME or another handler.
+  const floating = inspectorOpen || (narrow && sidebarOpen);
+  useEffect(() => {
+    if (!floating) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.isComposing || e.defaultPrevented) return;
+      setInspectorOpen(false);
+      if (narrow) setSidebarOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [floating, narrow]);
+
+  // The title is a one-row textarea that grows to show a long title in full (an
+  // <input> clips it). Its height follows its content: refit when the text
+  // changes and when its width does (window resize, rail collapse).
+  const fitTitle = useCallback(() => {
+    const el = titleInput.current;
+    if (el === null) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, []);
+  useLayoutEffect(fitTitle, [fitTitle, title]);
+  useEffect(() => {
+    const el = titleInput.current;
+    if (el === null || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(fitTitle);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [fitTitle]);
+
   const selected = entries.find((e) => e.id === selectedId) ?? null;
 
   // Live word count / reading time for the editor meta line (issue: surface the
@@ -99,6 +166,25 @@ export function JournalView({
     setTitle(entry?.title ?? "");
     setBody(entry?.body ?? "");
     setStatus(null);
+    if (narrow) setSidebarOpen(false);
+  }
+
+  function toggleSidebar() {
+    if (narrow && !sidebarOpen) setInspectorOpen(false);
+    setSidebarOpen((o) => !o);
+  }
+
+  function openInspector(tab: InspectorTab) {
+    setInspectorTab(tab);
+    setInspectorOpen(true);
+    if (narrow) setSidebarOpen(false);
+  }
+
+  // The compact header badge leads to the full one, which sits at the bottom of
+  // the Details tab — scroll it into view once that tab has rendered.
+  function showTrustCard() {
+    openInspector("details");
+    requestAnimationFrame(() => trustCard.current?.scrollIntoView({ block: "nearest" }));
   }
 
   // Inspector tab logic (shared by the header control and the in-drawer tabs):
@@ -108,8 +194,7 @@ export function JournalView({
     if (inspectorOpen && inspectorTab === tab) {
       setInspectorOpen(false);
     } else {
-      setInspectorTab(tab);
-      setInspectorOpen(true);
+      openInspector(tab);
     }
   }
 
@@ -202,16 +287,17 @@ export function JournalView({
             type="button"
             className="icon-button"
             aria-label={sidebarOpen ? "Collapse entries" : "Expand entries"}
-            aria-pressed={sidebarOpen}
-            onClick={() => setSidebarOpen((o) => !o)}
+            aria-expanded={sidebarOpen}
+            onClick={toggleSidebar}
           >
             <span className="hamburger" aria-hidden="true" />
           </button>
           <span className="brand">
             <span className="brand-mark" aria-hidden="true" />
-            Journal
+            <span className="brand-name">Journal</span>
           </span>
           <AttestationBadge status={session.status} onRetry={() => void session.verify()} />
+          <AttestationPill status={session.status} onOpen={showTrustCard} />
         </div>
         <div className="topbar-group">
           <div className="seg" role="tablist" aria-label="Inspector">
@@ -238,12 +324,26 @@ export function JournalView({
               Details
             </button>
           </div>
+          {/* Phones: the segmented control doesn't fit, so one button stands in. */}
+          <button
+            type="button"
+            className="icon-button inspector-toggle"
+            aria-label={inspectorOpen ? "Close inspector panel" : "Open inspector panel"}
+            aria-expanded={inspectorOpen}
+            onClick={() => pickTab(inspectorTab)}
+          >
+            <span className="panel-icon" aria-hidden="true" />
+          </button>
         </div>
       </header>
 
       <div className="journal-body">
-        <aside className={sidebarOpen ? "sidebar" : "sidebar sidebar--collapsed"}>
-          {sidebarOpen ? (
+        <aside
+          className={sidebarOpen ? "sidebar" : "sidebar sidebar--collapsed"}
+          inert={narrow && !sidebarOpen}
+        >
+          {/* A closed drawer keeps its contents (no dot rail) so it slides out intact. */}
+          {sidebarOpen || narrow ? (
             <>
               <div className="sidebar-head">
                 <span className="rail-label">Entries</span>
@@ -350,7 +450,8 @@ export function JournalView({
           )}
         </aside>
 
-        <main className="editor">
+        {/* Behind the scrim the editor is out of reach for Tab too. */}
+        <main className="editor" inert={narrow && (sidebarOpen || inspectorOpen)}>
           <div className="editor-meta">
             <span>{selected !== null ? formatDate(selected.createdAt) : "New entry"}</span>
             <span>
@@ -359,13 +460,33 @@ export function JournalView({
           </div>
           <div className="editor-surface">
             <article className="editor-article">
-              <input
+              <textarea
+                ref={titleInput}
                 className="title-input"
                 placeholder="Title"
+                rows={1}
                 value={title}
-                onChange={(e) => setTitle(e.target.value)}
+                // Still a single line of text: pasted newlines become spaces and
+                // Enter moves on to the body. The DOM value is cleaned in place so
+                // React sees no mismatch and the caret stays where the paste ended.
+                onChange={(e) => {
+                  const el = e.target;
+                  const clean = el.value.replace(/\r?\n/g, " ");
+                  if (clean !== el.value) {
+                    const pos = el.selectionStart;
+                    el.value = clean;
+                    el.setSelectionRange(pos, pos);
+                  }
+                  setTitle(clean);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+                  e.preventDefault();
+                  bodyInput.current?.focus();
+                }}
               />
               <textarea
+                ref={bodyInput}
                 className="body-input"
                 placeholder="Write your entry…"
                 value={body}
@@ -386,7 +507,21 @@ export function JournalView({
           </div>
         </main>
 
-        <aside className={inspectorOpen ? "inspector open" : "inspector"} aria-hidden={!inspectorOpen}>
+        {narrow && (sidebarOpen || inspectorOpen) && (
+          <div
+            className="scrim"
+            onClick={() => {
+              setSidebarOpen(false);
+              setInspectorOpen(false);
+            }}
+          />
+        )}
+
+        <aside
+          className={inspectorOpen ? "inspector open" : "inspector"}
+          aria-hidden={!inspectorOpen}
+          inert={!inspectorOpen}
+        >
           <div className="inspector-head">
             <div className="seg" role="tablist" aria-label="Inspector tabs">
               <button
@@ -428,7 +563,7 @@ export function JournalView({
                 <ChatPane db={db} journalKey={journalKey} session={session} embedded />
               </div>
             ) : (
-              <DetailsTab selected={selected} session={session} />
+              <DetailsTab selected={selected} session={session} trustCardRef={trustCard} />
             )}
           </div>
         </aside>
@@ -441,14 +576,28 @@ export function JournalView({
 function DetailsTab({
   selected,
   session,
+  trustCardRef,
 }: {
   selected: JournalEntry | null;
   session: EnclaveSession;
+  trustCardRef: Ref<HTMLDivElement>;
 }) {
+  const trustCard = (
+    <div className="trust-card" ref={trustCardRef}>
+      <AttestationBadge status={session.status} onRetry={() => void session.verify()} />
+      <p className="muted">
+        Stored only in this browser, encrypted with your passphrase. Enrichment and chat run
+        inside the verified enclave — nothing is kept server-side.
+      </p>
+    </div>
+  );
+  // The trust card shows even with no entry selected: it is where the top bar's
+  // compact badge sends people for the full status, Retry and "Know more".
   if (selected === null) {
     return (
       <div className="details">
         <p className="muted">Select an entry to see its details.</p>
+        {trustCard}
       </div>
     );
   }
@@ -491,13 +640,7 @@ function DetailsTab({
         <p className="muted">Not yet enriched by the enclave.</p>
       )}
 
-      <div className="trust-card">
-        <AttestationBadge status={session.status} onRetry={() => void session.verify()} />
-        <p className="muted">
-          Stored only in this browser, encrypted with your passphrase. Enrichment and chat run
-          inside the verified enclave — nothing is kept server-side.
-        </p>
-      </div>
+      {trustCard}
     </div>
   );
 }

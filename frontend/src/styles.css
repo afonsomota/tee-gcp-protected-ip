@@ -28,8 +28,11 @@ body {
   color: var(--ink-body);
 }
 
+/* Heights use 100dvh (the visible viewport, excluding mobile browser chrome)
+   wherever it is supported; the 100vh line before it is the fallback. */
 #root {
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 button {
@@ -82,6 +85,7 @@ textarea {
 
 .centered {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -109,9 +113,12 @@ textarea {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
   /* App shell: panes scroll internally; the shell itself never scrolls, so the
-     off-screen (closed) inspector drawer can't push out a page scrollbar. */
+     off-screen (closed) inspector drawer can't push out a page scrollbar.
+     `clip` (unlike `hidden`) also can't be scrolled by focus or scrollIntoView. */
   overflow: hidden;
+  overflow: clip;
 }
 
 .sidebar {
@@ -240,6 +247,25 @@ textarea {
   padding: 0.3rem 0.6rem;
   border-radius: 20px;
   border: 1px solid var(--border);
+}
+
+/* Compact top-bar pill (a <button>): swapped in for the full badge on small
+   screens by the responsive block at the end of this file. Sits before the
+   state variants so their colours still apply. */
+.attest-badge--compact {
+  display: none;
+  min-width: 0;
+  background: transparent;
+  /* For the pending state, which sets no colour of its own (a bare <button>
+     would otherwise be white-on-paper). */
+  color: inherit;
+}
+
+.attest-badge__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .attest-badge__dot {
@@ -616,7 +642,36 @@ textarea {
   gap: 14px;
 }
 
+/* The left group gives way so the bar never wraps or grows: the badge shrinks
+   and its failure text / detail (arbitrary length) each ellipsize on one line. */
+.topbar-group:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.topbar .attest-badge {
+  min-width: 0;
+}
+
+.topbar .attest-badge__text,
+.topbar .attest-badge__detail {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar .attest-badge__text {
+  display: block;
+}
+
+.topbar .attest-badge__retry,
+.topbar .attest-badge__link {
+  flex: none;
+}
+
 .brand {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -891,6 +946,12 @@ textarea {
   border: none;
   padding: 0;
   letter-spacing: -0.015em;
+  /* A one-row <textarea> whose height JournalView syncs to its content, so a
+     long title wraps instead of clipping. */
+  display: block;
+  flex: none;
+  resize: none;
+  overflow: hidden;
 }
 
 .body-input {
@@ -922,11 +983,18 @@ textarea {
   border-left: 1px solid var(--border);
   box-shadow: none;
   transform: translateX(100%);
-  transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+  /* Closed = hidden once the slide-out ends, so nothing in it can take focus
+     or be scrolled into view. */
+  visibility: hidden;
+  transition:
+    transform 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+    visibility 0s 0.26s;
 }
 
 .inspector.open {
   transform: translateX(0);
+  visibility: visible;
+  transition-delay: 0s;
   box-shadow: -18px 0 44px rgba(0, 0, 0, 0.13);
 }
 
@@ -995,6 +1063,12 @@ textarea {
   gap: 16px;
 }
 
+/* Sections keep their height and the tab scrolls; without this a short pane
+   squashes the (overflow: hidden) metadata grid to nothing. */
+.details > * {
+  flex-shrink: 0;
+}
+
 .details-entry {
   display: flex;
   flex-direction: column;
@@ -1061,6 +1135,25 @@ textarea {
   border-radius: 12px;
 }
 
+/* The card is 384px at most, too narrow for the badge's one-row layout: the
+   failure text takes the first row beside the dot, and Retry / Know more wrap
+   onto their own row below it. */
+.trust-card .attest-badge {
+  flex-wrap: wrap;
+  row-gap: 6px;
+  border-radius: 12px;
+}
+
+.trust-card .attest-badge__text {
+  flex: 1 1 calc(100% - 16px);
+  min-width: 0;
+}
+
+.trust-card .attest-badge--failed .attest-badge__dot {
+  align-self: flex-start;
+  margin-top: 0.3rem;
+}
+
 .trust-card p {
   margin: 0;
   font-size: 0.8rem;
@@ -1084,4 +1177,288 @@ textarea {
 
 .entry-link.selected {
   box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* ==========================================================================
+   Responsive layout. Desktop-first: everything above is the >900px design and
+   the blocks below only ever override it.
+     <=900px  both side panes are drawers over a full-width editor
+     <=600px  phone: compact header, full-width inspector sheet, tighter gutters
+   ========================================================================== */
+
+/* Small-screen-only controls; switched on by the media queries below. */
+.inspector-toggle,
+.scrim {
+  display: none;
+}
+
+/* CSS "side panel" glyph for the phone inspector button. */
+.panel-icon {
+  position: relative;
+  width: 17px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-radius: 3px;
+}
+
+.panel-icon::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 4px;
+  width: 2px;
+  background: currentColor;
+}
+
+/* User-written text may hold unbreakable strings (URLs); never let one widen
+   its pane. */
+.entry-preview,
+.details-title,
+.meta-val,
+.enrichment-summary,
+.chat-bubble,
+.chat-error {
+  overflow-wrap: anywhere;
+}
+
+/* Notched / gesture-bar devices (viewport-fit=cover): keep bottom controls
+   clear of the home indicator. env() is 0 everywhere else. */
+.sidebar footer,
+.chat-input-row {
+  padding-bottom: calc(0.7rem + env(safe-area-inset-bottom));
+}
+
+.know-more__table-wrap {
+  overflow-x: auto;
+}
+
+/* Touch: comfortable tap targets (44px primary, 40px secondary). */
+@media (pointer: coarse), (max-width: 900px) {
+  button {
+    min-height: 44px;
+  }
+
+  button.secondary,
+  .seg-btn,
+  .attest-badge--compact {
+    min-height: 40px;
+  }
+
+  .icon-button,
+  .inspector-head .icon-button {
+    width: 40px;
+    height: 40px;
+  }
+
+  .rail-dot {
+    width: 40px;
+    height: 40px;
+    min-height: 0;
+  }
+
+  .seg-btn {
+    padding: 0 1rem;
+  }
+
+  .attest-badge__retry {
+    padding: 0 0.8rem;
+  }
+
+  .attest-badge__link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+  }
+
+  /* Links inside running prose can't be 40px tall; vertical padding on an
+     inline box grows the hit area without moving the lines. */
+  .know-more__content a {
+    padding-block: 6px;
+  }
+}
+
+@media (max-width: 900px) {
+  .topbar {
+    padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
+  }
+
+  /* Full badge out, compact pill in. The trust card keeps the full badge. */
+  .topbar .attest-badge {
+    display: none;
+  }
+
+  .topbar .attest-badge--compact {
+    display: flex;
+  }
+
+  .editor {
+    min-width: 0;
+  }
+
+  /* Entries rail -> off-canvas drawer. Closed is translated fully off-screen
+     and hidden (see .inspector for why); there is no dot rail down here. */
+  .sidebar,
+  .sidebar--collapsed {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 4;
+    width: min(322px, 86vw);
+    padding-left: env(safe-area-inset-left);
+    box-shadow: 18px 0 44px rgba(0, 0, 0, 0.13);
+    transition:
+      transform 0.24s cubic-bezier(0.4, 0, 0.2, 1),
+      visibility 0s;
+  }
+
+  .sidebar--collapsed {
+    transform: translateX(-100%);
+    visibility: hidden;
+    box-shadow: none;
+    transition-delay: 0s, 0.24s;
+  }
+
+  .inspector {
+    width: min(384px, calc(100vw - 56px));
+  }
+
+  /* Dims the editor behind an open drawer; tapping it closes the drawer. */
+  .scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    background: rgba(33, 38, 26, 0.32);
+  }
+
+  .editor-meta {
+    padding: 12px 24px;
+  }
+
+  .editor-surface {
+    padding: 28px 24px 48px;
+  }
+}
+
+@media (max-width: 600px) {
+  .topbar {
+    height: 56px;
+    gap: 8px;
+    padding: 0 max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
+  }
+
+  .topbar-group {
+    gap: 8px;
+  }
+
+  /* One button replaces the Companion/Details control; the same tabs are at
+     the top of the sheet it opens. */
+  .topbar .seg {
+    display: none;
+  }
+
+  .inspector-toggle {
+    display: flex;
+  }
+
+  .inspector {
+    width: 100%;
+    border-left: none;
+  }
+
+  .inspector-head .seg,
+  .inspector-head .seg-btn {
+    flex: 1;
+  }
+
+  .editor-meta {
+    gap: 4px 16px;
+    justify-content: space-between;
+    padding: 10px 16px;
+  }
+
+  .editor-surface {
+    padding: 20px 16px calc(32px + env(safe-area-inset-bottom));
+  }
+
+  .title-input {
+    font-size: 1.5rem;
+  }
+
+  .body-input {
+    font-size: 1.05rem;
+    line-height: 1.65;
+  }
+
+  .editor-actions {
+    flex-wrap: wrap;
+  }
+
+  .know-more {
+    padding: 1rem max(1rem, env(safe-area-inset-right)) 3rem max(1rem, env(safe-area-inset-left));
+  }
+
+  .know-more__content h1 {
+    font-size: clamp(1.5rem, 7vw, 2rem);
+  }
+
+  .know-more__content h2 {
+    font-size: 1.25rem;
+  }
+
+  .know-more__content h1,
+  .know-more__content h2,
+  .know-more__content p,
+  .know-more__content li {
+    overflow-wrap: anywhere;
+  }
+
+  .know-more__table th,
+  .know-more__table td {
+    padding: 0.5rem 0.55rem;
+  }
+}
+
+@media (max-width: 360px) {
+  /* The mark alone carries the brand; the width goes to the status pill. */
+  .brand-name {
+    display: none;
+  }
+
+  .meta-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Landscape phones: height is the scarce axis, so give it to the writing. */
+@media (max-height: 480px) and (max-width: 900px) {
+  .topbar {
+    height: 48px;
+  }
+
+  .editor-meta {
+    display: none;
+  }
+
+  .editor-surface {
+    padding-top: 16px;
+    padding-bottom: 16px;
+  }
+
+  .title-input {
+    font-size: 1.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .inspector {
+    transition: none;
+  }
+
+  .entry-enriching {
+    animation: none;
+  }
 }
