@@ -75,6 +75,10 @@ use serde_json::{json, Value};
 mod prompts {
     /// The top-level system prompt prepended to every conversation.
     pub const SYSTEM: &str = include_str!("../prompts/system.md");
+    /// Instructions for the enclave `summarize` tool (entry enrichment).
+    pub const SUMMARIZE: &str = include_str!("../prompts/summarize.md");
+    /// Instructions for the enclave `extract_metadata` tool (entry enrichment).
+    pub const EXTRACT_METADATA: &str = include_str!("../prompts/extract_metadata.md");
 }
 
 /// How many tokens the model may generate per turn.
@@ -344,8 +348,16 @@ fn enrich(context: &Context) -> Option<Vec<u8>> {
     // First turn: request the enclave enrichment primitives as one batch.
     let text = entry_text(entry);
     let mut calls = vec![
-        json!({ "id": format!("summarize-{}", entry.id), "name": "summarize", "arguments": { "text": text } }),
-        json!({ "id": format!("extract-{}", entry.id), "name": "extract_metadata", "arguments": { "text": text } }),
+        json!({
+            "id": format!("summarize-{}", entry.id),
+            "name": "summarize",
+            "arguments": { "text": text, "instructions": prompts::SUMMARIZE.trim() },
+        }),
+        json!({
+            "id": format!("extract-{}", entry.id),
+            "name": "extract_metadata",
+            "arguments": { "text": text, "instructions": prompts::EXTRACT_METADATA.trim() },
+        }),
     ];
     if want_embed {
         calls.push(json!({

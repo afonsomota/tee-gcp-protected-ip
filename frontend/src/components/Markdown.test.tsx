@@ -43,13 +43,15 @@ describe("Markdown", () => {
     );
   });
 
-  it("links only safe schemes, and renders others as text", () => {
-    expect(html("[site](https://example.com)")).toContain(
-      '<a href="https://example.com" target="_blank" rel="noopener noreferrer">site</a>',
-    );
+  it("never renders links as clickable anchors, and shows the full URL", () => {
+    // Model output is steered by a private prompt; a clickable link could carry
+    // journal text off-device in its URL.
+    const out = html("[site](https://example.com/?d=secret)");
+    expect(out).not.toContain("<a ");
+    expect(out).not.toContain("href");
+    expect(out).toContain("site (https://example.com/?d=secret)");
     const xss = html("[click](javascript:alert(1))");
     expect(xss).not.toContain("<a ");
-    expect(xss).toContain("[click](javascript:alert(1))");
   });
 
   it("escapes raw HTML rather than injecting it", () => {

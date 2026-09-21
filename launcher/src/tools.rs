@@ -17,6 +17,11 @@
 //!   * `summarize`        — summarize text with the chat model
 //!   * `extract_metadata` — pull emotions/situations/life-phases (chat model)
 //!
+//! The two chat-model tools take the harness's own `instructions` (its private
+//! prompt): the launcher does not care *what* the model is asked, only that the
+//! output keeps a bounded shape (token caps, a tag schema) and goes nowhere but
+//! back into the sandbox. Prompts are company IP, not a privacy property.
+//!
 //! `embed` is advertised only when an embeddings model is loaded (see
 //! `manifest_json`): the harness reads the manifest to learn which enclave
 //! tools a deployment offers, so semantic search degrades gracefully to keyword
@@ -85,16 +90,19 @@ const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "summarize",
         description: "Summarize text with the in-enclave chat model; returns a \
-                      short summary.",
+                      short summary. `instructions` is the harness's own \
+                      (private) system prompt.",
         locus: Locus::Enclave,
-        required: &["text"],
+        required: &["text", "instructions"],
     },
     ToolSpec {
         name: "extract_metadata",
         description: "Extract emotions, situations, and life phases from text \
-                      with the in-enclave chat model.",
+                      with the in-enclave chat model. `instructions` is the \
+                      harness's own (private) system prompt; the output is \
+                      constrained to the tag schema regardless.",
         locus: Locus::Enclave,
-        required: &["text"],
+        required: &["text", "instructions"],
     },
 ];
 
@@ -104,17 +112,16 @@ pub fn lookup(name: &str) -> Option<&'static ToolSpec> {
 }
 
 /// Validate one harness-emitted tool call against the manifest. Returns the
-/// matched spec on success. Errors describe only the manifest (public policy)
-/// and the call's shape — never user content — so they are safe to surface.
-pub fn validate_call(name: &str, arguments: &Value) -> Result<&'static ToolSpec, String> {
-    let spec = lookup(name).ok_or_else(|| format!("tool not in manifest: {name:?}"))?;
+/// matched spec on success. Errors are `&'static str` on purpose: `name` and
+/// `arguments` are harness-controlled, and these errors end up in operator-
+/// visible logs, so the type guarantees none of those bytes can ride along.
+pub fn validate_call(name: &str, arguments: &Value) -> Result<&'static ToolSpec, &'static str> {
+    let spec = lookup(name).ok_or("tool not in manifest")?;
     let obj = arguments
         .as_object()
-        .ok_or_else(|| format!("tool {name:?}: arguments must be a JSON object"))?;
-    if let Some(missing) = spec.required.iter().find(|k| !obj.contains_key(**k)) {
-        return Err(format!(
-            "tool {name:?}: missing required argument {missing:?}"
-        ));
+        .ok_or("tool arguments must be a JSON object")?;
+    if spec.required.iter().any(|k| !obj.contains_key(*k)) {
+        return Err("tool call missing a required argument");
     }
     Ok(spec)
 }
@@ -178,13 +185,13 @@ pub fn manifest_json(embeddings_available: bool) -> Value {
             "name": "summarize",
             "description": lookup("summarize").unwrap().description,
             "locus": Locus::Enclave,
-            "parameters": text_tool_parameters(),
+            "parameters": prompted_text_tool_parameters(),
         }),
         json!({
             "name": "extract_metadata",
             "description": lookup("extract_metadata").unwrap().description,
             "locus": Locus::Enclave,
-            "parameters": text_tool_parameters(),
+            "parameters": prompted_text_tool_parameters(),
         }),
     ];
     if embeddings_available {
@@ -209,6 +216,18 @@ fn text_tool_parameters() -> Value {
     })
 }
 
+/// The `{ text, instructions }` parameter schema of the chat-model text tools.
+fn prompted_text_tool_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "text": { "type": "string", "description": "The text to process." },
+            "instructions": { "type": "string", "description": "System prompt for the model." },
+        },
+        "required": ["text", "instructions"],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,7 +244,7 @@ mod tests {
         let spec = validate_call("embed", &json!({ "text": "hello" })).unwrap();
         assert_eq!(spec.name, "embed");
         assert_eq!(spec.locus, Locus::Enclave);
-        let spec = validate_call("summarize", &json!({ "text": "hello" })).unwrap();
+        let spec = validate_call("summarize", &json!({ "text": "hello", "instructions": "be brief" })).unwrap();
         assert_eq!(spec.locus, Locus::Enclave);
     }
 
@@ -233,12 +252,14 @@ mod tests {
     fn unknown_tool_is_rejected() {
         let err = validate_call("exfiltrate", &json!({})).unwrap_err();
         assert!(err.contains("not in manifest"), "unexpected error: {err}");
+        // The harness-chosen name must not be echoed into (logged) errors.
+        assert!(!err.contains("exfiltrate"), "harness bytes leaked: {err}");
     }
 
     #[test]
     fn missing_required_argument_is_rejected() {
         let err = validate_call("attach_metadata", &json!({ "entry_id": "x" })).unwrap_err();
-        assert!(err.contains("enrichment"), "unexpected error: {err}");
+        assert!(err.contains("required argument"), "unexpected error: {err}");
     }
 
     #[test]
