@@ -74,36 +74,38 @@ export function KnowMorePage({ onBack }: Props) {
 
         <section>
           <h2>What the operator can and cannot see</h2>
-          <table className="know-more__table">
-            <thead>
-              <tr>
-                <th>What</th>
-                <th>Visible to operator?</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Your journal entries</td>
-                <td>No — encrypted client-side, stored only in your browser</td>
-              </tr>
-              <tr>
-                <td>Your chat messages</td>
-                <td>No — HPKE-encrypted before leaving your device</td>
-              </tr>
-              <tr>
-                <td>The model's replies</td>
-                <td>No — encrypted inside the enclave for your browser only</td>
-              </tr>
-              <tr>
-                <td>That you used the service</td>
-                <td>Yes — network logs show connections to the API endpoint</td>
-              </tr>
-              <tr>
-                <td>The proprietary model / harness code</td>
-                <td>Yes — the operator loads it into the enclave at startup</td>
-              </tr>
-            </tbody>
-          </table>
+          <div className="know-more__table-wrap">
+            <table className="know-more__table">
+              <thead>
+                <tr>
+                  <th>What</th>
+                  <th>Visible to operator?</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Your journal entries</td>
+                  <td>No — encrypted client-side, stored only in your browser</td>
+                </tr>
+                <tr>
+                  <td>Your chat messages</td>
+                  <td>No — HPKE-encrypted before leaving your device</td>
+                </tr>
+                <tr>
+                  <td>The model's replies</td>
+                  <td>No — encrypted inside the enclave for your browser only</td>
+                </tr>
+                <tr>
+                  <td>That you used the service</td>
+                  <td>Yes — network logs show connections to the API endpoint</td>
+                </tr>
+                <tr>
+                  <td>The proprietary model / harness code</td>
+                  <td>Yes — the operator loads it into the enclave at startup</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </section>
 
         <section>

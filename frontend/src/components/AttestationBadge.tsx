@@ -25,18 +25,20 @@ function failureLabel(code: string): string {
   return code in FAILURE_LABELS ? FAILURE_LABELS[code as keyof typeof FAILURE_LABELS] : code;
 }
 
+function pendingLabel(kind: "idle" | "verifying" | "warming"): string {
+  return kind === "warming"
+    ? "Enclave starting…"
+    : kind === "verifying"
+      ? "Verifying enclave…"
+      : "Connecting…";
+}
+
 export function AttestationBadge({ status, onRetry }: Props) {
   if (status.kind === "idle" || status.kind === "verifying" || status.kind === "warming") {
-    const label =
-      status.kind === "warming"
-        ? "Enclave starting…"
-        : status.kind === "verifying"
-          ? "Verifying enclave…"
-          : "Connecting…";
     return (
       <div className="attest-badge attest-badge--pending">
         <span className="attest-badge__dot" />
-        {label}
+        {pendingLabel(status.kind)}
       </div>
     );
   }
@@ -45,7 +47,7 @@ export function AttestationBadge({ status, onRetry }: Props) {
     return (
       <div className="attest-badge attest-badge--failed">
         <span className="attest-badge__dot" />
-        <span>
+        <span className="attest-badge__text" title={status.detail}>
           <strong>Enclave not verified</strong>
           {" — "}
           {failureLabel(status.code)}
@@ -73,5 +75,39 @@ export function AttestationBadge({ status, onRetry }: Props) {
         Know more
       </a>
     </div>
+  );
+}
+
+function pillState(status: AttestationStatus): { variant: string; label: string } {
+  if (status.kind === "failed") return { variant: "failed", label: "Not verified" };
+  if (status.kind !== "verified") return { variant: "pending", label: pendingLabel(status.kind) };
+  if (!status.signatureVerified) return { variant: "dev", label: "Dev mode" };
+  return { variant: "ok", label: "Verified" };
+}
+
+/**
+ * Compact, single-line badge for the top bar on small screens: a dot and a
+ * short label only. The failure detail, Retry and "Know more" don't fit in a
+ * phone header, so tapping the pill opens the full badge (the inspector's
+ * Details tab) instead.
+ */
+export function AttestationPill({
+  status,
+  onOpen,
+}: {
+  status: AttestationStatus;
+  onOpen: () => void;
+}) {
+  const { variant, label } = pillState(status);
+  return (
+    <button
+      type="button"
+      className={`attest-badge attest-badge--compact attest-badge--${variant}`}
+      aria-label={`Enclave status: ${label}. Show details`}
+      onClick={onOpen}
+    >
+      <span className="attest-badge__dot" />
+      <span className="attest-badge__label">{label}</span>
+    </button>
   );
 }
