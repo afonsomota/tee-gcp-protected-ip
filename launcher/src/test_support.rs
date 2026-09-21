@@ -26,7 +26,7 @@ pub async fn mock_llama(include_system: bool) -> String {
     use axum::{Json, Router};
 
     let completions = move |Json(body): Json<serde_json::Value>| async move {
-        let seen: Vec<String> = body["messages"]
+        let mut seen: Vec<String> = body["messages"]
             .as_array()
             .map(|messages| {
                 messages
@@ -42,6 +42,13 @@ pub async fn mock_llama(include_system: bool) -> String {
                     .collect()
             })
             .unwrap_or_default();
+        // Alongside the system turns, echo the thinking switch so the harness
+        // tests can prove it reached the model.
+        if include_system {
+            if let Some(thinking) = body["chat_template_kwargs"]["enable_thinking"].as_bool() {
+                seen.push(format!("enable_thinking: {thinking}"));
+            }
+        }
         Json(serde_json::json!({
             "choices": [
                 { "message": { "role": "assistant", "content": format!("model saw [{}]", seen.join(" | ")) } }
