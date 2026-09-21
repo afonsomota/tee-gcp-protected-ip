@@ -610,6 +610,11 @@ mod tests {
             text.contains("user: how was my week?"),
             "history dropped: {text}"
         );
+        // Chat answers directly: the reasoning channel is off (spike 003).
+        assert!(
+            text.contains("enable_thinking: false"),
+            "thinking not disabled: {text}"
+        );
     }
 
     #[tokio::test]

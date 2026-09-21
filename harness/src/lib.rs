@@ -278,7 +278,14 @@ fn answer(messages: &[Message], tool_results: &[ToolResult]) -> Option<Vec<u8>> 
         content: m.content.clone(),
     }));
 
-    let request = json!({ "messages": prompt, "max_tokens": MAX_TOKENS });
+    // The deployed Gemma template has a reasoning channel (spike 003). On chat
+    // it spends most of the reply's latency on hidden tokens at CPU decode
+    // speed, so answer directly. Templates without the switch ignore it.
+    let request = json!({
+        "messages": prompt,
+        "max_tokens": MAX_TOKENS,
+        "chat_template_kwargs": { "enable_thinking": false },
+    });
     let reply = call_model(&serde_json::to_vec(&request).ok()?)?;
     serde_json::to_vec(&json!({ "reply": reply })).ok()
 }
