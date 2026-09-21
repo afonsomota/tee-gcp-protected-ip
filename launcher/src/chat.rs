@@ -434,23 +434,26 @@ fn decrypt_request<T: serde::de::DeserializeOwned>(
 /// in-enclave). Every call must name a manifest tool and be well-formed, and a
 /// `tool_calls` batch must be single-locus — a harness must not mix loci or
 /// hand the browser an enclave tool. Anything else is rejected.
-fn classify_harness_output(bytes: &[u8]) -> Result<Routed, String> {
-    let output: Value =
-        serde_json::from_slice(bytes).map_err(|e| format!("harness reply is not JSON: {e}"))?;
+fn classify_harness_output(bytes: &[u8]) -> Result<Routed, &'static str> {
+    // Errors are `&'static str`: they are logged, and the operator reads the
+    // logs. Anything derived from the harness's bytes (serde messages quote
+    // them; tool names are harness-chosen) would be a channel out of the
+    // sandbox, so the type rules it out.
+    let output: Value = serde_json::from_slice(bytes).map_err(|_| "harness reply is not JSON")?;
 
     let Some(tool_calls) = output.get("tool_calls") else {
         // No tool calls: must be a plain reply.
         if output.get("reply").and_then(Value::as_str).is_some() {
             return Ok(Routed::ToClient);
         }
-        return Err("harness reply has neither \"reply\" nor \"tool_calls\"".to_string());
+        return Err("harness reply has neither \"reply\" nor \"tool_calls\"");
     };
 
     let calls = tool_calls
         .as_array()
         .ok_or("harness \"tool_calls\" must be an array")?;
     if calls.is_empty() {
-        return Err("harness emitted an empty \"tool_calls\" array".to_string());
+        return Err("harness emitted an empty \"tool_calls\" array");
     }
 
     let mut enclave_calls = Vec::new();
@@ -479,7 +482,7 @@ fn classify_harness_output(bytes: &[u8]) -> Result<Routed, String> {
     // browser and partly executing in-enclave, which the loop can't represent
     // and the harness has no need to do.
     if saw_client && !enclave_calls.is_empty() {
-        return Err("harness mixed client and enclave tools in one batch".to_string());
+        return Err("harness mixed client and enclave tools in one batch");
     }
     if enclave_calls.is_empty() {
         Ok(Routed::ToClient)
@@ -836,8 +839,8 @@ mod tests {
         // An enclave-locus batch is executed in-enclave, never returned to the
         // browser; classify hands back the parsed calls to run.
         let bytes = br#"{"tool_calls":[
-            {"id":"s","name":"summarize","arguments":{"text":"x"}},
-            {"id":"e","name":"extract_metadata","arguments":{"text":"x"}}
+            {"id":"s","name":"summarize","arguments":{"text":"x","instructions":"i"}},
+            {"id":"e","name":"extract_metadata","arguments":{"text":"x","instructions":"i"}}
         ]}"#;
         let Ok(Routed::Enclave(calls)) = classify_harness_output(bytes) else {
             panic!("expected enclave routing");
@@ -852,7 +855,7 @@ mod tests {
         // launcher cannot both seal it to the browser and run it in-enclave.
         let bad = br#"{"tool_calls":[
             {"id":"1","name":"search_entries","arguments":{"query":"x"}},
-            {"id":"2","name":"summarize","arguments":{"text":"x"}}
+            {"id":"2","name":"summarize","arguments":{"text":"x","instructions":"i"}}
         ]}"#;
         let err = classify_harness_output(bad).unwrap_err();
         assert!(err.contains("mixed"), "unexpected error: {err}");
@@ -872,7 +875,24 @@ mod tests {
         // Missing the required `query` argument for search_entries.
         let bad = br#"{"tool_calls":[{"id":"1","name":"search_entries","arguments":{}}]}"#;
         let err = classify_harness_output(bad).unwrap_err();
-        assert!(err.contains("query"), "unexpected error: {err}");
+        assert!(err.contains("required argument"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn classify_errors_never_echo_harness_bytes() {
+        // Rejection details are logged, and logs are operator-visible. A harness
+        // that deliberately emits bad output must not get any of its bytes
+        // (e.g. user text stuffed into a tool name or a malformed JSON value)
+        // into the error string.
+        for bad in [
+            &br#"{"tool_calls":[{"id":"1","name":"secret-journal-text","arguments":{}}]}"#[..],
+            &br#"{"reply": 1, "x": "secret-journal-text"#[..],
+            &br#"{"tool_calls": "secret-journal-text"}"#[..],
+            &br#"["secret-journal-text"]"#[..],
+        ] {
+            let err = classify_harness_output(bad).unwrap_err();
+            assert!(!err.contains("secret-journal"), "harness bytes leaked: {err}");
+        }
     }
 
     #[test]

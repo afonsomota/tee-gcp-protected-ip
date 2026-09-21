@@ -5,12 +5,14 @@ import { createElement, type ReactNode } from "react";
  *
  * It deliberately covers only the common subset a chat model emits — paragraphs,
  * headings, ordered/unordered lists, blockquotes, fenced + inline code, bold,
- * italic, strikethrough, and links. Anything it doesn't recognise is rendered as
+ * italic, strikethrough, and (inert) links. Anything it doesn't recognise is rendered as
  * literal text, so it degrades gracefully and never throws.
  *
  * It builds a React element tree and never uses `dangerouslySetInnerHTML`, so
- * model output cannot inject HTML. Link hrefs are restricted to http(s)/mailto;
- * any other scheme is rendered as plain text. Keeping our own ~120-line renderer
+ * model output cannot inject HTML. Links are never made clickable: the reply is
+ * written by the company's private harness prompt, so a link could carry the
+ * user's entries in its URL and one click would send them off-device. A link is
+ * shown as its text followed by the full, visible URL. Keeping our own ~120-line renderer
  * (vs. pulling in remark/rehype) is in keeping with the project's small,
  * auditable dependency surface.
  */
@@ -18,7 +20,6 @@ export function Markdown({ children }: { children: string }) {
   return <>{parseBlocks(children)}</>;
 }
 
-const SAFE_HREF = /^(https?:|mailto:)/i;
 
 function isBlockStart(line: string): boolean {
   return (
@@ -204,19 +205,17 @@ function parseInline(text: string): ReactNode[] {
       continue;
     }
 
-    // Link: [text](href) — only http(s)/mailto hrefs become anchors.
+    // Link: [text](href) — rendered inert as "text (href)", never an anchor.
+    // The URL is shown in full so nothing hides in it, and the user can still
+    // copy it deliberately.
     m = /^\[([^\]]+)\]\(([^)\s]+)\)/.exec(rest);
     if (m) {
       flush();
-      if (SAFE_HREF.test(m[2])) {
-        out.push(
-          <a key={key++} href={m[2]} target="_blank" rel="noopener noreferrer">
-            {parseInline(m[1])}
-          </a>,
-        );
-      } else {
-        out.push(m[0]); // unknown scheme: render the raw markdown literally
-      }
+      out.push(
+        <span key={key++} className="md-link">
+          {parseInline(m[1])} ({m[2]})
+        </span>,
+      );
       i += m[0].length;
       continue;
     }

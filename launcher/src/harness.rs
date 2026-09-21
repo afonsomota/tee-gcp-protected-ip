@@ -529,6 +529,13 @@ mod tests {
         assert!(names.contains(&"summarize"));
         assert!(names.contains(&"extract_metadata"));
         assert!(names.contains(&"embed"));
+        // The prompts are the harness's own: every chat-model call carries them.
+        for call in reply["tool_calls"].as_array().unwrap() {
+            if call["name"] != "embed" {
+                let instructions = call["arguments"]["instructions"].as_str().unwrap();
+                assert!(!instructions.is_empty());
+            }
+        }
     }
 
     #[tokio::test]

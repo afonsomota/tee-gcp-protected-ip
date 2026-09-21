@@ -6,10 +6,12 @@
 //! supervised models and feeds the results straight back to the harness
 //! (`chat.rs` drives that loop). The browser never sees an enclave tool call.
 //!
-//! These are deliberately *capabilities*, not orchestration: their prompts are
-//! fixed and auditable (part of the open TCB). The harness's IP is *when/why*
-//! to call them — the policy that strings embeds, summaries and extractions
-//! together — not the primitives themselves (see docs/DESIGN.md).
+//! These are deliberately *capabilities*, not orchestration. The prompts for
+//! `summarize`/`extract_metadata` belong to the harness (company IP) and arrive
+//! as the `instructions` argument; the launcher holds none. Privacy does not
+//! rest on what the model is asked: every result goes back into the sandbox
+//! only, and what the TCB does fix is the output's *shape* — token caps, and
+//! for metadata a constrained-decoding tag schema (see docs/DESIGN.md).
 //!
 //! The no-leak invariant from `chat.rs`/`upstream.rs` holds here too: error
 //! strings name only the tool and its shape, never the (user) text being
@@ -21,21 +23,6 @@ use serde_json::{json, Value};
 /// object. Bounding them keeps CPU inference snappy and the output small.
 const SUMMARY_MAX_TOKENS: u32 = 128;
 const METADATA_MAX_TOKENS: u32 = 192;
-
-/// Fixed, auditable prompt for the `summarize` capability.
-const SUMMARIZE_SYSTEM: &str = "You summarize a personal journal entry in one or \
-    two plain sentences. Capture what happened and how the writer felt. Reply \
-    with the summary only — no preamble, no quotes.";
-
-/// Fixed, auditable prompt for the `extract_metadata` capability. The model is
-/// asked for strict JSON; the request also constrains decoding to the schema in
-/// `metadata_response_format`, and `parse_metadata` is lenient about what comes
-/// back — the shape is enforced in three independent layers.
-const EXTRACT_SYSTEM: &str = "You extract structured metadata from a personal \
-    journal entry. Respond with ONLY a JSON object with exactly these keys: \
-    \"emotions\", \"situations\", \"lifePhases\". Each value is an array of at \
-    most five short lowercase tags (e.g. \"joy\", \"work\", \"new job\"). Use an \
-    empty array when nothing fits. No prose, no code fences.";
 
 /// The model upstreams an enclave tool may reach. `chat` is always present (it
 /// is the same llama-server `/chat` uses); `embeddings` is the second
@@ -59,10 +46,16 @@ pub async fn execute(
         .get("text")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("enclave tool {name:?}: missing string \"text\" argument"))?;
+    let instructions = || {
+        arguments
+            .get("instructions")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("enclave tool {name:?}: missing string \"instructions\" argument"))
+    };
     match name {
         "embed" => embed(text, upstreams).await,
-        "summarize" => summarize(text, upstreams).await,
-        "extract_metadata" => extract_metadata(text, upstreams).await,
+        "summarize" => summarize(instructions()?, text, upstreams).await,
+        "extract_metadata" => extract_metadata(instructions()?, text, upstreams).await,
         // Unreachable in practice — the manifest gates names — but keep the
         // failure explicit rather than silently succeeding.
         other => Err(format!("enclave tool {other:?} has no in-enclave executor")),
@@ -82,10 +75,10 @@ async fn embed(text: &str, upstreams: &Upstreams) -> Result<Value, String> {
 }
 
 /// `summarize` → `{ "summary": "<text>" }`.
-async fn summarize(text: &str, upstreams: &Upstreams) -> Result<Value, String> {
+async fn summarize(instructions: &str, text: &str, upstreams: &Upstreams) -> Result<Value, String> {
     let summary = complete(
         &upstreams.chat,
-        SUMMARIZE_SYSTEM,
+        instructions,
         text,
         SUMMARY_MAX_TOKENS,
         None,
@@ -100,10 +93,14 @@ async fn summarize(text: &str, upstreams: &Upstreams) -> Result<Value, String> {
 /// schema-valid JSON; if some upstream ignores that and returns something
 /// unparseable, `parse_metadata` degrades to empty arrays rather than failing
 /// the enrichment turn.
-async fn extract_metadata(text: &str, upstreams: &Upstreams) -> Result<Value, String> {
+async fn extract_metadata(
+    instructions: &str,
+    text: &str,
+    upstreams: &Upstreams,
+) -> Result<Value, String> {
     let raw = complete(
         &upstreams.chat,
-        EXTRACT_SYSTEM,
+        instructions,
         text,
         METADATA_MAX_TOKENS,
         Some(metadata_response_format()),
@@ -113,7 +110,7 @@ async fn extract_metadata(text: &str, upstreams: &Upstreams) -> Result<Value, St
     Ok(parse_metadata(&raw))
 }
 
-/// One chat completion with a fixed system prompt over the given user text.
+/// One chat completion with the harness's system prompt over the given user text.
 /// `response_format`, when given, is llama-server's constrained-decoding spec
 /// (see `metadata_response_format`).
 ///
@@ -299,7 +296,7 @@ mod tests {
         let upstream = mock_llama(true).await;
         let out = execute(
             "summarize",
-            &json!({ "text": "started a new job" }),
+            &json!({ "text": "started a new job", "instructions": "Summarize." }),
             &upstreams(upstream, None),
         )
         .await
@@ -343,7 +340,7 @@ mod tests {
         let (upstream, seen) = capturing_llama().await;
         execute(
             "summarize",
-            &json!({ "text": "x" }),
+            &json!({ "text": "x", "instructions": "Summarize." }),
             &upstreams(upstream, None),
         )
         .await
@@ -362,7 +359,7 @@ mod tests {
         let (upstream, seen) = capturing_llama().await;
         execute(
             "extract_metadata",
-            &json!({ "text": "x" }),
+            &json!({ "text": "x", "instructions": "Extract tags." }),
             &upstreams(upstream, None),
         )
         .await
@@ -381,6 +378,20 @@ mod tests {
         assert_eq!(schema["additionalProperties"], json!(false));
         // The cap on tags lives in the grammar as well as in parse_metadata.
         assert_eq!(schema["properties"]["emotions"]["maxItems"], json!(5));
+    }
+
+    #[tokio::test]
+    async fn missing_instructions_argument_is_rejected() {
+        // The launcher holds no prompt of its own to fall back on.
+        let err = execute(
+            "extract_metadata",
+            &json!({ "text": "secret-journal-text" }),
+            &upstreams("127.0.0.1:1".to_string(), None),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("instructions"), "unexpected: {err}");
+        assert!(!err.contains("secret-journal"), "plaintext leaked: {err}");
     }
 
     #[tokio::test]
@@ -424,13 +435,13 @@ mod tests {
         // channel only sometimes blew the token budget), so a single pass could
         // pass by luck. With thinking off it must succeed every time.
         for i in 0..5 {
-            let summary = execute("summarize", &json!({ "text": entry }), &ups)
+            let summary = execute("summarize", &json!({ "text": entry, "instructions": "Summarize this journal entry in one or two plain sentences." }), &ups)
                 .await
                 .unwrap();
             let s = summary["summary"].as_str().unwrap_or_default();
             assert!(!s.trim().is_empty(), "run {i}: empty summary");
 
-            let meta = execute("extract_metadata", &json!({ "text": entry }), &ups)
+            let meta = execute("extract_metadata", &json!({ "text": entry, "instructions": "Extract emotions, situations and lifePhases tags as JSON." }), &ups)
                 .await
                 .unwrap();
             let populated = ["emotions", "situations", "lifePhases"]

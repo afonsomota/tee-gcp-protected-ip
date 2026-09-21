@@ -25,7 +25,7 @@ provably constrains: nothing leaves except the reply you see."*
 | User auth & keys | **No server-side accounts.** The passphrase derives the user's master key in the browser (Argon2id). Login *is* key derivation. Enclave sessions are anonymous. |
 | Storage | **Local-first**: ciphertext in browser IndexedDB (export/import supported). The cloud stores no user data at rest — "we cannot leak what we do not have". KMS/GCS exist only to protect company IP. |
 | Data flow | **On-demand minimization.** Entries enter enclave memory only when the harness's search tool retrieves them (top-k), per session, never persisted server-side. |
-| Tools | Manifest in the open launcher declares each tool's execution locus. Enclave-side (model-bound): `embed`, `summarize`, `extract_metadata` (emotions, situations, life phases). Client-side (data-bound): `attach_metadata`, `search_entries` (metadata filters + vector similarity over locally stored embeddings). The harness's secret sauce is *when/why* to call tools, not the tools themselves. |
+| Tools | Manifest in the open launcher declares each tool's execution locus. Enclave-side (model-bound): `embed`, `summarize`, `extract_metadata` (emotions, situations, life phases). The prompts for `summarize`/`extract_metadata` are the harness's (passed as an `instructions` argument) — prompts are company IP, not a privacy property; the launcher fixes only the output *shape* (token caps, tag schema). Client-side (data-bound): `attach_metadata`, `search_entries` (metadata filters + vector similarity over locally stored embeddings). The harness's secret sauce is *when/why* to call tools, not the tools themselves. |
 | Build verification | **Reproducible builds as the trust anchor**: the released image is produced by a fully pinned, deterministic recipe (pinned-container musl build → fixed-metadata layer tar → pinned crane append onto the digest-pinned official llama.cpp server base, spike 002 / issue #29) that any verifier re-runs offline to re-derive the digest — zero trust in the operator or CI. Canonical build on GitHub Actions with an independent cross-rebuild job, release-blocking on digest mismatch; sigstore artifact attestations as the convenience tier. Residual limitations (documented in README): both builds run on GitHub infra, so CI compromise is detectable by third-party rebuilds, not prevented; and llama-server's bytes are upstream's public content-addressed artifact at the pinned digest, not re-derived from source (source rebuild recorded as future hardening). The base is mirrored by digest into Artifact Registry (`make mirror-base`), so rebuilds never depend on ghcr retention. Weights are never baked; until issue #7 lands, release builds serve 503 on `/chat`. See `docs/spikes/002-llama-server-in-release-image.md`. |
 | Frontend | React + Vite + TypeScript SPA (pnpm), deployed to **GitHub Pages** by Actions. hpke-js + jose for crypto. Verifies attestation and shows a badge with a "know more" link to the verify docs. Trust-on-first-use caveat documented; paranoid users run it locally. |
 | Release flow | Frontend: auto via Actions. Enclave: release tag triggers the reproducible build workflow (build + independent re-derivation + push by digest + attestation), then explicit `make deploy` (pin digest into the CVM, update KMS attestation policy). |
@@ -53,7 +53,12 @@ New entry → enclave (`extract_metadata`, `embed`, `summarize`) → results bac
 (firmware/OS/runtime — the acknowledged platform TCB), and the open launcher
 (+ wasmtime, llama.cpp, rustls). The harness is *untrusted*: sandboxed,
 no capabilities beyond host functions; its only output path is the reply and
-tool-calls — all of which go to the user.
+tool-calls — all of which go to the user. Because everything the model is asked
+(chat and enrichment prompts alike) is harness-private, the guarantee is carried
+entirely by those *exits*, which the launcher and frontend must keep closed:
+nothing harness-derived reaches operator-visible logs (rejection errors are
+`&'static str` by type), and model output is rendered inert in the browser
+(links shown as text + full URL, never clickable; no images/HTML).
 
 **Company IP rests on:** KMS attestation-gated key release (Google IAM is in
 the *IP* TCB, not the *privacy* TCB).
@@ -82,7 +87,12 @@ this threat model's adversary: the KMS key lives in the operator's project,
 and a project owner can always re-grant themselves decrypt. Because TLS is
 defense-in-depth, fresh issuance per boot loses nothing that matters.
 
-**Explicitly out of scope / documented caveats:** side-channel attacks;
+**Explicitly out of scope / documented caveats:** side-channel attacks,
+including harness-modulated metadata (reply size, tool-round count, timing) —
+the goal is that journal content is not readable in full or in meaningful
+chunks, not that no bit ever leaks; the integrity of harness-steered outputs
+(summaries, tags, chat) — private prompts can bias them, only confidentiality
+is guaranteed;
 compromised user device/browser extensions; frontend TOFU (mitigated by
 local-run option); Google could in principle issue attestation tokens
 falsely (platform trust); model-output IP leakage (distillation).
